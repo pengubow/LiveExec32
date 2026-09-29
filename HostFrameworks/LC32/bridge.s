@@ -34,6 +34,7 @@ _LC32_objc_msgSendSuper_stret:
 .global _LC32InvokeHostMessageTwoU64
 .global _LC32InvokeHostMessageFourDoubles
 .global _LC32InvokeHostMessageSixDoubles
+.global _LC32InvokeHostMessageCMTime
 _LC32InvokeHostMessageInteger:
 _LC32InvokeHostMessageFloat:
 _LC32InvokeHostMessageDouble:
@@ -41,6 +42,7 @@ _LC32InvokeHostMessageTwoDoubles:
 _LC32InvokeHostMessageTwoU64:
 _LC32InvokeHostMessageFourDoubles:
 _LC32InvokeHostMessageSixDoubles:
+_LC32InvokeHostMessageCMTime:
     .cfi_startproc
     stp x29, x30, [sp, #-16]!
     .cfi_def_cfa_offset 16

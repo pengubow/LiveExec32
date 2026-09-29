@@ -3,6 +3,7 @@
 #include "crash_exception.h"
 #include "guest_dispatch.h"
 #include "LC32ObjCBridgeABI.h"
+#include "LC32CoreMediaTimeABI.h"
 #include "LC32DebugLog.h"
 #import "../UIKit/LegacyNibLoading.h"
 
@@ -10,6 +11,7 @@
 #import <mach/mach_init.h>
 #import <mach/vm_map.h>
 #import <objc/message.h>
+#import <CoreMedia/CoreMedia.h>
 
 #include <atomic>
 #include <array>
@@ -87,6 +89,12 @@ extern "C" LC32HostMessageFourDoubles LC32InvokeHostMessageFourDoubles(
     const LC32HostMessageInvocation *invocation);
 extern "C" LC32_SixDoubles LC32InvokeHostMessageSixDoubles(
     const LC32HostMessageInvocation *invocation);
+extern "C" CMTime LC32InvokeHostMessageCMTime(
+    const LC32HostMessageInvocation *invocation);
+
+static_assert(sizeof(CMTime) == 24 &&
+    offsetof(CMTime, timescale) == 8 && offsetof(CMTime, flags) == 12 &&
+    offsetof(CMTime, epoch) == 16, "unexpected native CMTime layout");
 
 static id LC32RetainOwnedHostObject(id object);
 
@@ -3530,6 +3538,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     } returnKind = HostReturnKind::Integer;
     bool returnsBlock = false;
     bool returnsNSRange = false;
+    bool returnsCMTime = false;
     if(hasMethodSignature) {
         char *returnType = copyReturnType();
         if(returnType) {
@@ -3546,6 +3555,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
             returnsBlock = unqualifiedType[0] == '@' &&
                 unqualifiedType[1] == '?';
             returnsNSRange = LC32NativeNSRangeType(unqualifiedType);
+            returnsCMTime = LC32EncodingIsCMTime(unqualifiedType);
             free(returnType);
         }
     }
@@ -3615,6 +3625,22 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     auto invokeStruct = [&](bool invokeSuper, u64 target) {
         const LC32HostMessageInvocation invocation =
             makeHostMessageInvocation(invokeSuper, target);
+        if(returnsCMTime) {
+            if(structLen != sizeof(CMTime)) {
+                fprintf(stderr,
+                    "LC32: invalid CMTime return size %u for selector %s\n",
+                    structLen, sel_getName(selector));
+                return;
+            }
+            // Clang supplies the native result address in x8. The common
+            // message trampoline preserves it while loading both argument
+            // banks; the resulting fixed-width fields need no narrowing.
+            LC32GuestHostCallQuiescence quiescence;
+            const CMTime result = LC32InvokeHostMessageCMTime(&invocation);
+            quiescence.finish();
+            Dynarmic_mem_1write(structPtr, sizeof(result), (char *)&result);
+            return;
+        }
         if(returnsNSRange) {
             if(structLen != sizeof(LC32HostMessageTwoU64)) {
                 printf("LC32: invalid NSRange return size %u for selector %s\n",

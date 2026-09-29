@@ -158,6 +158,13 @@ static NSUInteger LC32SelectorArgumentCount(SEL selector) {
 @end
 
 @implementation LC32ObjCMethod
+@synthesize selector = _selector;
+@synthesize selectorString = _selectorString;
+@synthesize isInstanceMethod = _isInstanceMethod;
+@synthesize typeEncoding = _typeEncoding;
+@synthesize returnTypeStorage = _returnTypeStorage;
+@synthesize argumentTypes = _argumentTypes;
+@synthesize hasCompleteTypeEncoding = _hasCompleteTypeEncoding;
 
 + (instancetype)method:(Method)method
        isInstanceMethod:(BOOL)isInstanceMethod {
@@ -198,8 +205,8 @@ static NSUInteger LC32SelectorArgumentCount(SEL selector) {
     result.argumentTypes = argumentTypes;
     BOOL implicitArgumentsValid =
         argumentTypes.count >= 2 &&
-        [argumentTypes[0] isEqualToString:@"@"] &&
-        [argumentTypes[1] isEqualToString:@":"];
+        [[argumentTypes objectAtIndex:0] isEqualToString:@"@"] &&
+        [[argumentTypes objectAtIndex:1] isEqualToString:@":"];
     result.hasCompleteTypeEncoding =
         complete && implicitArgumentsValid &&
         runtimeArgumentCount == expectedArgumentCount;
@@ -260,8 +267,8 @@ static NSUInteger LC32SelectorArgumentCount(SEL selector) {
     // Extra non-offset data means our parser and selector disagree.
     if(*cursor) complete = NO;
     if(argumentTypes.count < 2 ||
-       ![argumentTypes[0] isEqualToString:@"@"] ||
-       ![argumentTypes[1] isEqualToString:@":"]) {
+       ![[argumentTypes objectAtIndex:0] isEqualToString:@"@"] ||
+       ![[argumentTypes objectAtIndex:1] isEqualToString:@":"]) {
         complete = NO;
     }
 
@@ -281,7 +288,8 @@ static NSUInteger LC32SelectorArgumentCount(SEL selector) {
 
 - (const char *)argumentTypeAtIndex:(NSUInteger)index {
     if(index >= self.argumentTypes.count) return "?";
-    const char *argumentType = self.argumentTypes[index].UTF8String;
+    const char *argumentType =
+        [[self.argumentTypes objectAtIndex:index] UTF8String];
     return argumentType ? argumentType : "?";
 }
 
@@ -301,7 +309,7 @@ static NSUInteger LC32SelectorArgumentCount(SEL selector) {
     for(NSUInteger index = 2; index < self.numberOfArguments; index++) {
         NSUInteger componentIndex = index - 2;
         NSString *component = componentIndex < selectorComponents.count
-            ? selectorComponents[componentIndex]
+            ? [selectorComponents objectAtIndex:componentIndex]
             : [NSString stringWithFormat:@"argument%lu",
                (unsigned long)componentIndex];
         NSString *type =

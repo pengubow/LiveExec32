@@ -83,9 +83,19 @@ def check_output(key, indices, table=fixture):
     require("LC32HostToGuestOwnedObject" not in body,
             f"Output incorrectly consumes host ownership: {key}")
     if declaration.startswith("(void)"):
-        require("(void)LC32InvokeHostSelector(" in body and "host_ret" not in body,
+        require("LC32InvokeHostSelector(" in body and "host_ret" not in body,
                 f"Void output method has an unused return value: {key}")
     return declaration, body
+
+
+declaration, body = enabled("-borrowObject:class:")
+for selector, spelling, index in (
+    ("borrowObject", "id", 0), ("class", "Class", 1),
+):
+    require(f"{selector}:({spelling} __unsafe_unretained)guest_arg{index}" in declaration,
+            f"Object input acquired ARC ownership: {declaration}")
+    require(f"uint64_t host_arg{index} = [guest_arg{index} host_self];" in body,
+            f"Borrowed object input lost native forwarding: {selector}")
 
 
 for name, spelling in (
@@ -157,6 +167,20 @@ for selector in (
 require("backgroundTimeRemaining" in application,
         "Background-task filtering accidentally removed other UIApplication methods")
 
+private_uikit_classes = (
+    "_UIAppearance", "UIDynamicSystemColor", "UIDynamicColor",
+    "UILayoutContainerView", "UICachedDeviceWhiteColor",
+    "UIDeviceWhiteColor", "UIDeviceRGBColor",
+    "UITableViewCellLayoutManager", "_UIMoreListTableView",
+    "UIMoreListCellLayoutManager", "UIMoreListController",
+    "UIMoreNavigationController", "UINibDecoder",
+)
+for class_name in private_uikit_classes:
+    source = root / "full/UIKit" / f"{class_name}.m"
+    require(source.is_file(), f"Missing captured private UIKit class: {class_name}")
+    require("WARNING: types came from" not in source.read_text(),
+            f"Private UIKit class still depends on host runtime: {class_name}")
+
 for mode in ("captured", "runtime", "full"):
     log = (root / f"{mode}.log").read_text()
     summaries = re.findall(
@@ -199,7 +223,11 @@ PY
 # counted arrays, with the guest's 32-bit ABI and the production bridge header.
 GUEST_SDK=${LC32_GUEST_SDK:-$REPO_ROOT/tmp/iPhoneOS10.3.sdk}
 if [ -d "$GUEST_SDK" ]; then
-    CLANG=$(xcrun --sdk macosx --find clang)
+    if [ "$(uname -s)" = Linux ]; then
+        CLANG=${LC32_GUEST_CC:-clang}
+    else
+        CLANG=$(xcrun --sdk macosx --find clang)
+    fi
     "$CLANG" -target armv7s-apple-ios10.3 -isysroot "$GUEST_SDK" \
         -fsyntax-only -fobjc-arc -fblocks -fmodules \
         -fmodules-cache-path="$TEMP_ROOT/module-cache" \

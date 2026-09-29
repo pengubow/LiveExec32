@@ -1,11 +1,17 @@
+#if defined(__APPLE__)
 @import Darwin;
 @import QuartzCore;
 @import CoreFoundation;
 @import Foundation;
 @import UIKit;
 @import ObjectiveC;
+#else
+#import <Foundation/Foundation.h>
+#import <objc/runtime.h>
+#endif
 
 #import "ObjCMethod.h"
+#include "../../include/LC32CoreMediaTimeABI.h"
 
 #include <string.h>
 
@@ -17,6 +23,7 @@ typedef NS_ENUM(NSUInteger, LC32KnownStruct) {
     LC32KnownStructCGSize,
     LC32KnownStructNSRange,
     LC32KnownStructUIEdgeInsets,
+    LC32KnownStructCMTime,
 };
 
 static const char *LC32UnqualifiedEncoding(const char *encoding) {
@@ -56,6 +63,7 @@ static BOOL LC32EncodingIsOpaqueCFObjectPointer(const char *encoding) {
 
 static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if(!encoding) return LC32KnownStructNone;
+    if(LC32EncodingIsCMTime(encoding)) return LC32KnownStructCMTime;
 
     while(*encoding && strchr("rnNoORVA", *encoding)) encoding++;
     if(!strncmp(encoding, "{CGAffineTransform=", sizeof("{CGAffineTransform=") - 1)) {
@@ -80,7 +88,14 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     return LC32KnownStructNone;
 }
 
-@interface MethodParameter : NSObject
+@interface MethodParameter : NSObject {
+@private
+    NSString *_name;
+    NSString *_type;
+    const char *_signature;
+    int _index;
+    int _objectArrayCountIndex;
+}
 @property(nonatomic, retain) NSString *name;
 @property(nonatomic, retain) NSString *type;
 @property(nonatomic, assign) const char *signature;
@@ -91,6 +106,11 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 @property(nonatomic) int objectArrayCountIndex;
 @end
 @implementation MethodParameter
+@synthesize name = _name;
+@synthesize type = _type;
+@synthesize signature = _signature;
+@synthesize index = _index;
+@synthesize objectArrayCountIndex = _objectArrayCountIndex;
 
 // FIXME: will need to parse header to return correctly. On 64bit, NS*Integer and CGFloat are not distinguishable from 32bit
 + (NSString *)readableTypeForSignature:(const char *)signature {
@@ -105,6 +125,9 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     }
     if(LC32KnownStructForEncoding(signature) == LC32KnownStructNSRange) {
         return @"NSRange";
+    }
+    if(LC32KnownStructForEncoding(signature) == LC32KnownStructCMTime) {
+        return @"CMTime";
     }
 
     // Correct some 32bit types
@@ -257,6 +280,18 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
     if ([self.type isEqualToString:@"_NSZone *"]) {
         return [NSString stringWithFormat:@"%@:(struct %@)guest_arg%d", self.name, self.type, self.index];
     }
+    const char *signature = LC32UnqualifiedEncoding(self.signature);
+    if(signature && (*signature == '@' || *signature == '#')) {
+        /* The synchronous forwarding stub borrows its caller's arguments.
+         * ARC's default strong parameters otherwise insert a guest retain and
+         * release merely to read host_self. A guest subclass can override
+         * retain, so that artificial pair need not balance its bridged release.
+         * Native methods still apply their own ownership to the host argument.
+         */
+        return [NSString stringWithFormat:
+            @"%@:(%@ __unsafe_unretained)guest_arg%d",
+            self.name, self.type, self.index];
+    }
     return [NSString stringWithFormat:@"%@:(%@)guest_arg%d", self.name, self.type, self.index];
 }
 
@@ -331,6 +366,10 @@ static LC32KnownStruct LC32KnownStructForEncoding(const char *encoding) {
 
     const LC32KnownStruct knownStruct =
         LC32KnownStructForEncoding(self.signature);
+    if(knownStruct == LC32KnownStructCMTime) {
+        return [NSString stringWithFormat:
+            @"CMTime host_arg%1$d = guest_arg%1$d;", self.index];
+    }
     if(knownStruct == LC32KnownStructNSRange) {
         return [NSString stringWithFormat:
             @"LC32NSRange64 host_arg%1$d = LC32WidenNSRange(guest_arg%1$d);",
@@ -547,7 +586,15 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
     return NO;
 }
 
-@interface MethodBuilder : NSObject
+@interface MethodBuilder : NSObject {
+@private
+    LC32ObjCMethod *_method;
+    NSString *_className;
+    NSString *_returnType;
+    NSMutableArray<MethodParameter *> *_parameters;
+    NSMutableArray<NSString *> *_lines;
+    BOOL _disabledByUnhandledType;
+}
 @property(nonatomic, retain) LC32ObjCMethod *method;
 @property(nonatomic, retain) NSString *className;
 @property(nonatomic, retain) NSString *returnType;
@@ -556,6 +603,12 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
 @property(nonatomic) BOOL disabledByUnhandledType;
 @end
 @implementation MethodBuilder
+@synthesize method = _method;
+@synthesize className = _className;
+@synthesize returnType = _returnType;
+@synthesize parameters = _parameters;
+@synthesize lines = _lines;
+@synthesize disabledByUnhandledType = _disabledByUnhandledType;
 
 - (instancetype)initWithMethod:(LC32ObjCMethod *)method
                       className:(NSString *)className {
@@ -576,7 +629,7 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
         NSString *arg = [MethodParameter readableTypeForSignature:argType];
         NSUInteger selectorIndex = i - 2;
         NSString *name = selectorIndex < selectorParameters.count
-            ? selectorParameters[selectorIndex]
+            ? [selectorParameters objectAtIndex:selectorIndex]
             : [NSString stringWithFormat:@"argument%lu", (unsigned long)selectorIndex];
         [self.parameters addObject:[[MethodParameter alloc]
             initWithIndex:(int)selectorIndex
@@ -617,12 +670,14 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
     // debug: log calls
     [self.lines addObject:@"  if(LC32ObjCTraceEnabled()) printf(\"DBG: call [%s %s]\\n\", class_getName(self.class), sel_getName(_cmd));"];
 
-    // pull host selector
+    // A guest can exchange this method's implementation with another selector.
+    // Forward to the native method represented by this shim, not the selector
+    // used to invoke its exchanged implementation.
     [self.lines addObject:
         @"  static uint64_t _host_cmd __attribute__((aligned(8)));" ];
     [self.lines addObject:[NSString stringWithFormat:
-        @"  uint64_t host_cmd = LC32CachedHostSelector(&_host_cmd, _cmd, %d);",
-        self.method.returnType[0] == '{']];
+        @"  uint64_t host_cmd = LC32CachedHostSelector(&_host_cmd, @selector(%@), %d);",
+        self.method.selectorString, self.method.returnType[0] == '{']];
 
     // pull host objects
     for(MethodParameter *param in self.parameters) {
@@ -674,10 +729,14 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
          !LC32MethodReturnsOwnedResult(self.className, self.method)) ||
         returnsBorrowedOpaqueObject;
     if(self.method.returnType[0] == 'v') {
-        [call appendString:@"(void)LC32InvokeHostSelector(self.host_self, host_cmd"];
+        [call appendString:@"LC32InvokeHostSelector(self.host_self, host_cmd"];
     } else if(self.method.returnType[0] == '{') {
-        if(LC32KnownStructForEncoding(self.method.returnType) ==
-                LC32KnownStructNSRange) {
+        const LC32KnownStruct knownStruct =
+            LC32KnownStructForEncoding(self.method.returnType);
+        if(knownStruct == LC32KnownStructCMTime) {
+            [call appendString:
+                @"CMTime host_ret = {0}; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)"];
+        } else if(knownStruct == LC32KnownStructNSRange) {
             [call appendString:
                 @"LC32NSRange64 host_ret; LC32InvokeHostSelector(self.host_self, host_cmd, &host_ret, sizeof(host_ret)"];
         } else {
@@ -762,6 +821,9 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
 
     const LC32KnownStruct knownStruct =
         LC32KnownStructForEncoding(self.method.returnType);
+    if(knownStruct == LC32KnownStructCMTime) {
+        return @"return host_ret;";
+    }
     if(knownStruct == LC32KnownStructNSRange) {
         return @"return LC32NarrowNSRange(host_ret);";
     }
@@ -789,7 +851,15 @@ static BOOL LC32MethodReturnsNotFoundIndex(NSString *className,
 }
 @end
 
-@interface ClassBuilder : NSObject
+@interface ClassBuilder : NSObject {
+@private
+    NSMutableDictionary<NSString *, id> *_methods;
+    NSString *_className;
+    NSString *_imagePath;
+    BOOL _usesRuntimeSignatures;
+    NSUInteger _skippedIncompleteMethods;
+    NSUInteger _skippedFilteredMethods;
+}
 @property(nonatomic, retain) NSMutableDictionary<NSString *, id> *methods;
 @property(nonatomic, retain) NSString *className;
 @property(nonatomic, retain) NSString *imagePath;
@@ -1080,6 +1150,12 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
 }
 
 @implementation ClassBuilder
+@synthesize methods = _methods;
+@synthesize className = _className;
+@synthesize imagePath = _imagePath;
+@synthesize usesRuntimeSignatures = _usesRuntimeSignatures;
+@synthesize skippedIncompleteMethods = _skippedIncompleteMethods;
+@synthesize skippedFilteredMethods = _skippedFilteredMethods;
 - (NSUInteger)disabledMethods {
     NSUInteger count = 0;
     for(id method in self.methods.allValues) {
@@ -1130,11 +1206,11 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     self.methods = [NSMutableDictionary new];
 
     for(NSString *kind in @[@"+", @"-"]) {
-        NSDictionary *methods = dict[kind];
+        NSDictionary *methods = [dict objectForKey:kind];
         BOOL isInstanceMethod = [kind isEqualToString:@"-"];
         for(NSString *selectorName in
                 [methods.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
-            NSString *typeEncoding = methods[selectorName];
+            NSString *typeEncoding = [methods objectForKey:selectorName];
             LC32ObjCMethod *method = [LC32ObjCMethod
                 methodWithSelector:NSSelectorFromString(selectorName)
                       typeEncoding:typeEncoding.UTF8String
@@ -1214,12 +1290,13 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
         [string appendFormat:@"%@ {\n", method.description];
         //[string appendString:@"  self.host_self = LC32GetHostClass(class_getName(self.class));\n"];
         [string appendFormat:@"}"];
-        self.methods[methodKey] = string;
+        [self.methods setObject:string forKey:methodKey];
         return;
     }
 
-    self.methods[methodKey] = [[MethodBuilder alloc]
+    MethodBuilder *builder = [[MethodBuilder alloc]
         initWithMethod:method className:self.className];
+    [self.methods setObject:builder forKey:methodKey];
 }
 
 - (NSString *)description {
@@ -1236,6 +1313,13 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     [string appendFormat:@"#import <LC32/LC32.h>\n"];
     [string appendFormat:@"#import <CoreGraphics/CoreGraphics+LC32.h>\n"];
     [string appendFormat:@"#import <UIKit/UIKit+LC32.h>\n"];
+    [string appendString:@"#import <CoreMedia/CoreMedia.h>\n"];
+    [string appendString:
+        @"_Static_assert(sizeof(CMTime) == 24 && "
+         "offsetof(CMTime, timescale) == 8 && "
+         "offsetof(CMTime, flags) == 12 && "
+         "offsetof(CMTime, epoch) == 16, "
+         "\"unexpected guest CMTime layout\");\n"];
     [string appendString:
         @"// Proxy methods intentionally forward across an ABI boundary; "
          "source-level noescape and guest self/super checks do not apply.\n"
@@ -1291,7 +1375,8 @@ static BOOL LC32MethodHasIndirectObjectBuffer(NSString *className,
     NSMutableArray<NSString *> *methodSources =
         [NSMutableArray arrayWithCapacity:methodKeys.count];
     for(NSString *methodKey in methodKeys) {
-        [methodSources addObject:[self.methods[methodKey] description]];
+        [methodSources addObject:[[self.methods objectForKey:methodKey]
+            description]];
     }
     [string appendString:[methodSources componentsJoinedByString:@"\n\n"]];
     [string appendString:@"\n"];
@@ -1372,7 +1457,7 @@ static BOOL LC32ValidateSignaturesPlist(NSDictionary *frameworks,
                     @"Invalid framework path component: %@", frameworkName]);
         }
 
-        id classes = frameworks[frameworkName];
+        id classes = [frameworks objectForKey:frameworkName];
         if(![classes isKindOfClass:NSDictionary.class]) {
             return LC32SetValidationError(error,
                 [NSString stringWithFormat:
@@ -1387,7 +1472,7 @@ static BOOL LC32ValidateSignaturesPlist(NSDictionary *frameworks,
                         frameworkName, className]);
             }
 
-            id methodKinds = classes[className];
+            id methodKinds = [classes objectForKey:className];
             if(![methodKinds isKindOfClass:NSDictionary.class]) {
                 return LC32SetValidationError(error,
                     [NSString stringWithFormat:
@@ -1405,7 +1490,7 @@ static BOOL LC32ValidateSignaturesPlist(NSDictionary *frameworks,
                             frameworkName, className, kind]);
                 }
 
-                id methods = methodKinds[kind];
+                id methods = [methodKinds objectForKey:kind];
                 if(![methods isKindOfClass:NSDictionary.class]) {
                     return LC32SetValidationError(error,
                         [NSString stringWithFormat:
@@ -1414,7 +1499,7 @@ static BOOL LC32ValidateSignaturesPlist(NSDictionary *frameworks,
                 }
 
                 for(id selectorName in methods) {
-                    id typeEncoding = methods[selectorName];
+                    id typeEncoding = [methods objectForKey:selectorName];
                     if(![selectorName isKindOfClass:NSString.class] ||
                        [(NSString *)selectorName length] == 0 ||
                        ![typeEncoding isKindOfClass:NSString.class] ||
@@ -1435,7 +1520,7 @@ static BOOL LC32ValidateFrameworkMap(NSDictionary *frameworkMap,
                                      NSDictionary *frameworks,
                                      NSError **error) {
     for(id sourceKey in frameworkMap) {
-        id destinationFramework = frameworkMap[sourceKey];
+        id destinationFramework = [frameworkMap objectForKey:sourceKey];
         if(![sourceKey isKindOfClass:NSString.class] ||
            ![destinationFramework isKindOfClass:NSString.class]) {
             return LC32SetValidationError(error,
@@ -1445,18 +1530,18 @@ static BOOL LC32ValidateFrameworkMap(NSDictionary *frameworkMap,
         NSArray<NSString *> *sourceComponents =
             [(NSString *)sourceKey componentsSeparatedByString:@"/"];
         if(sourceComponents.count != 2 ||
-           !LC32IsSafePathComponent(sourceComponents[0]) ||
-           !LC32IsSafePathComponent(sourceComponents[1])) {
+           !LC32IsSafePathComponent([sourceComponents objectAtIndex:0]) ||
+           !LC32IsSafePathComponent([sourceComponents objectAtIndex:1])) {
             return LC32SetValidationError(error,
                 [NSString stringWithFormat:
                     @"Invalid framework map source: %@", sourceKey]);
         }
 
-        NSString *sourceFramework = sourceComponents[0];
-        NSString *sourceClass = sourceComponents[1];
-        NSDictionary *classes = frameworks[sourceFramework];
+        NSString *sourceFramework = [sourceComponents objectAtIndex:0];
+        NSString *sourceClass = [sourceComponents objectAtIndex:1];
+        NSDictionary *classes = [frameworks objectForKey:sourceFramework];
         if(![classes isKindOfClass:NSDictionary.class] ||
-           !classes[sourceClass]) {
+           ![classes objectForKey:sourceClass]) {
             return LC32SetValidationError(error,
                 [NSString stringWithFormat:
                     @"Framework map source is not in the signatures plist: %@",
@@ -1477,26 +1562,26 @@ static BOOL LC32ValidateFrameworkMap(NSDictionary *frameworkMap,
     NSMutableDictionary<NSString *, NSString *> *outputOwners =
         [NSMutableDictionary new];
     for(NSString *sourceFramework in frameworks) {
-        NSDictionary *classes = frameworks[sourceFramework];
+        NSDictionary *classes = [frameworks objectForKey:sourceFramework];
         for(NSString *sourceClass in classes) {
             NSString *sourceKey = [NSString stringWithFormat:@"%@/%@",
                                                               sourceFramework,
                                                               sourceClass];
-            NSString *destinationFramework = frameworkMap[sourceKey];
+            NSString *destinationFramework = [frameworkMap objectForKey:sourceKey];
             if([destinationFramework isEqualToString:@"-"]) continue;
             if(!destinationFramework) destinationFramework = sourceFramework;
 
             NSString *outputKey = [NSString stringWithFormat:@"%@/%@",
                                                               destinationFramework,
                                                               sourceClass];
-            NSString *existingOwner = outputOwners[outputKey];
+            NSString *existingOwner = [outputOwners objectForKey:outputKey];
             if(existingOwner) {
                 return LC32SetValidationError(error,
                     [NSString stringWithFormat:
                         @"Framework map collision at %@ between %@ and %@",
                         outputKey, existingOwner, sourceKey]);
             }
-            outputOwners[outputKey] = sourceKey;
+            [outputOwners setObject:sourceKey forKey:outputKey];
         }
     }
     return YES;
@@ -1592,9 +1677,15 @@ LC32GenerateRuntimeUIKitExtras(NSString *outputRoot,
             for(NSString *selectorName in
                     [appearanceMethods.allKeys
                         sortedArrayUsingSelector:@selector(compare:)]) {
-                NSString *declaringClass = appearanceMethods[selectorName];
+                NSString *declaringClass =
+                    [appearanceMethods objectForKey:selectorName];
+                NSDictionary *uikitClasses =
+                    [frameworks objectForKey:@"UIKit"];
+                NSDictionary *declaringMethods =
+                    [[uikitClasses objectForKey:declaringClass]
+                        objectForKey:@"-"];
                 NSString *typeEncoding =
-                    frameworks[@"UIKit"][declaringClass][@"-"][selectorName];
+                    [declaringMethods objectForKey:selectorName];
                 if(![typeEncoding isKindOfClass:NSString.class] ||
                    typeEncoding.length == 0) {
                     fprintf(stderr,
@@ -1713,7 +1804,7 @@ int main(int argc, char **argv) {
         NSArray<NSString *> *frameworkNames =
             [frameworks.allKeys sortedArrayUsingSelector:@selector(compare:)];
         for(NSString *frameworkName in frameworkNames) {
-            NSDictionary *classes = frameworks[frameworkName];
+            NSDictionary *classes = [frameworks objectForKey:frameworkName];
             if(![classes isKindOfClass:NSDictionary.class]) {
                 fprintf(stderr, "Invalid framework entry: %s\n",
                         frameworkName.UTF8String);
@@ -1728,7 +1819,8 @@ int main(int argc, char **argv) {
                     NSString *sourceKey =
                         [NSString stringWithFormat:@"%@/%@",
                                                    frameworkName, className];
-                    NSString *destinationFramework = frameworkMap[sourceKey];
+                    NSString *destinationFramework =
+                        [frameworkMap objectForKey:sourceKey];
                     if([destinationFramework isEqualToString:@"-"]) continue;
                     if(!destinationFramework) {
                         destinationFramework = frameworkName;
@@ -1756,7 +1848,8 @@ int main(int argc, char **argv) {
                         frameworkCount++;
                     }
 
-                    NSDictionary *methodSignatures = classes[className];
+                    NSDictionary *methodSignatures =
+                        [classes objectForKey:className];
                     if(![methodSignatures isKindOfClass:NSDictionary.class]) {
                         fprintf(stderr, "Invalid class entry: %s/%s\n",
                                 frameworkName.UTF8String,

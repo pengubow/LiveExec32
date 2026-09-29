@@ -8,7 +8,16 @@ NS_ASSUME_NONNULL_BEGIN
 /// This deliberately does not use NSMethodSignature: several valid iOS 10
 /// encodings contain arrays, bitfields, or C++ types that NSMethodSignature
 /// rejects. Captured plist entries can also describe APIs absent from the host.
-@interface LC32ObjCMethod : NSObject
+@interface LC32ObjCMethod : NSObject {
+@private
+    SEL _selector;
+    NSString *_selectorString;
+    BOOL _isInstanceMethod;
+    NSString *_typeEncoding;
+    NSString *_returnTypeStorage;
+    NSArray<NSString *> *_argumentTypes;
+    BOOL _hasCompleteTypeEncoding;
+}
 
 @property(nonatomic, assign, readonly) SEL selector;
 @property(nonatomic, copy, readonly) NSString *selectorString;

@@ -52,7 +52,7 @@ require_line \
     '// Input-only scalar pointer guest_arg0 needs no copyback' \
     "$FIXTURE_SOURCE"
 require_line \
-    '(void)LC32InvokeHostSelector(self.host_self, host_cmd' \
+    'LC32InvokeHostSelector(self.host_self, host_cmd' \
     "$FIXTURE_SOURCE"
 
 if grep -Fq 'uint64_t host_ret =' "$FIXTURE_SOURCE"; then
@@ -89,6 +89,9 @@ require_line \
     "$UICOLOR_SOURCE"
 require_line \
     '- (void)setCGColor:(CGColorRef)guest_arg0 {' \
+    "$UICOLOR_SOURCE"
+require_line \
+    'LC32CachedHostSelector(&_host_cmd, @selector(setCGColor:), 0)' \
     "$UICOLOR_SOURCE"
 
 if grep -Fq '@dynamic CGColor;' "$UICOLOR_SOURCE"; then

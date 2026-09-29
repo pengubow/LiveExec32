@@ -5,6 +5,15 @@ SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/../.." && pwd)
 cd "$SCRIPT_DIR"
 
+if [ "$(uname -s)" = Linux ]; then
+    clang -fconstant-string-class=NSConstantString \
+        -I/usr/include -I"$(gcc -print-file-name=include)" \
+        -pthread -Wno-deprecated-declarations \
+        main.m ObjCMethod.m -lgnustep-base -lobjc -lm \
+        -o GenerateShimObjC
+    exit 0
+fi
+
 MACOSX_SDK_DIR=$(xcrun --sdk macosx --show-sdk-path)
 CLANG=$(xcrun --sdk macosx --find clang)
 MODULE_CACHE=${CLANG_MODULE_CACHE_PATH:-$REPO_ROOT/.theos/module-cache}
