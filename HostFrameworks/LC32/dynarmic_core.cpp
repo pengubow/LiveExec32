@@ -169,6 +169,27 @@ static void ReleaseMemoryBackingReference(
     RetireMemoryBacking(backing);
 }
 
+bool GuestVmRangeHasMappingLocked(
+        u64 address, u64 size) {
+    if (sharedHandle.memory == nullptr || size == 0 ||
+            (address & DYN_PAGE_MASK) != 0 ||
+            (size & DYN_PAGE_MASK) != 0 ||
+            !GuestAddressRangeIsValid32(address, size)) {
+        return false;
+    }
+
+    khash_t(memory) *memory = sharedHandle.memory;
+    const u64 end = address + size;
+    for (u64 page = address; page < end;
+            page += DYN_PAGE_SIZE) {
+        if (kh_get(memory, memory, page) !=
+                kh_end(memory)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void ReleaseMemoryPageBacking(
         t_memory_page page) {
     if (page == nullptr) {
@@ -720,6 +741,145 @@ static u64 Dynarmic_mem_reserve(
 
     LC32_DEBUG_PRINTF("Dynarmic_mem_reserve: 0x%llx-0x%llx\n", address, address + size);
     return address;
+}
+
+kern_return_t RemapGuestVmMemory(
+        u32 source, u32 *target, u32 size, u32 mask,
+        int flags, bool copy,
+        vm_prot_t *currentProtection,
+        vm_prot_t *maximumProtection) {
+    if (target == nullptr || currentProtection == nullptr ||
+            maximumProtection == nullptr || size == 0 ||
+            (source & DYN_PAGE_MASK) != 0 ||
+            (size & DYN_PAGE_MASK) != 0 ||
+            !GuestAddressRangeIsValid32(source, size) ||
+            (flags & ~(VM_FLAGS_ANYWHERE | VM_FLAGS_OVERWRITE)) != 0 ||
+            (mask & (mask + 1)) != 0) {
+        return KERN_INVALID_ARGUMENT;
+    }
+    if (copy) {
+        return KERN_NOT_SUPPORTED;
+    }
+
+    const bool anywhere = (flags & VM_FLAGS_ANYWHERE) != 0;
+    const bool overwrite = (flags & VM_FLAGS_OVERWRITE) != 0;
+    const u64 alignmentMask =
+        std::max<u64>(mask, DYN_PAGE_MASK);
+    if (!anywhere &&
+            ((*target & alignmentMask) != 0 ||
+                !GuestAddressRangeIsValid32(*target, size))) {
+        return KERN_INVALID_ADDRESS;
+    }
+
+    struct SourcePage {
+        void *address;
+        t_memory_backing backing;
+        int permissions;
+        bool enforceDataPermissions;
+    };
+    std::vector<SourcePage> sourcePages;
+    std::unique_lock<std::recursive_mutex> lock(
+        guestVmMutex);
+    khash_t(memory) *memory = sharedHandle.memory;
+    if (memory == nullptr) {
+        return KERN_INVALID_ADDRESS;
+    }
+    try {
+        sourcePages.reserve(size / DYN_PAGE_SIZE);
+    } catch (const std::exception &) {
+        return KERN_RESOURCE_SHORTAGE;
+    }
+    for (u64 address = source;
+            address < static_cast<u64>(source) + size;
+            address += DYN_PAGE_SIZE) {
+        const khiter_t entry = kh_get(
+            memory, memory, address);
+        if (entry == kh_end(memory)) {
+            return KERN_INVALID_ADDRESS;
+        }
+        const t_memory_page page = kh_value(memory, entry);
+        if (page == nullptr || page->addr == nullptr) {
+            return KERN_INVALID_ADDRESS;
+        }
+        if (page->backing == nullptr) {
+            return KERN_NOT_SUPPORTED;
+        }
+        if (!sourcePages.empty() &&
+                page->perms != sourcePages.front().permissions) {
+            return KERN_NOT_SUPPORTED;
+        }
+        sourcePages.push_back({
+            page->addr, page->backing, page->perms,
+            page->enforceDataPermissions,
+        });
+    }
+
+    if (!anywhere && !overwrite &&
+            GuestVmRangeHasMappingLocked(*target, size)) {
+        return KERN_NO_SPACE;
+    }
+
+    /* Keep the backing alive if a fixed overwrite intersects the source. */
+    for (const SourcePage &page : sourcePages) {
+        ++page.backing->references;
+    }
+
+    std::vector<GuestPageReservation> reservations;
+    const u64 requestedAddress = anywhere ? 0 : *target;
+    const u64 mappedAddress = Dynarmic_mem_reserve(
+        requestedAddress, size, !anywhere,
+        alignmentMask,
+        &reservations);
+    if (mappedAddress == UINT64_MAX) {
+        for (const SourcePage &page : sourcePages) {
+            ReleaseMemoryBackingReference(page.backing);
+        }
+        return errno == EINVAL
+            ? KERN_INVALID_ARGUMENT : KERN_NO_SPACE;
+    }
+
+    InvalidateGuestMemoryLookupCaches();
+    for (size_t index = 0;
+            index < sourcePages.size(); ++index) {
+        const u64 address = mappedAddress +
+            index * DYN_PAGE_SIZE;
+        const khiter_t entry = kh_get(
+            memory, memory, address);
+        t_memory_page destination =
+            kh_value(memory, entry);
+        const SourcePage &sourcePage =
+            sourcePages[index];
+        t_memory_backing oldBacking =
+            destination->backing;
+        destination->addr = sourcePage.address;
+        destination->perms = sourcePage.permissions;
+        destination->enforceDataPermissions =
+            sourcePage.enforceDataPermissions;
+        destination->backing = sourcePage.backing;
+
+        const u64 pageIndex =
+            address >> DYN_PAGE_BITS;
+        if (sharedHandle.page_table != nullptr &&
+                pageIndex <
+                    sharedHandle.num_page_table_entries) {
+            __atomic_store_n(
+                &sharedHandle.page_table[pageIndex],
+                GuestPageTablePointer(
+                    address, destination),
+                __ATOMIC_RELEASE);
+        }
+        ReleaseMemoryBackingReference(oldBacking);
+    }
+    reservations.clear();
+
+    *target = static_cast<u32>(mappedAddress);
+    *currentProtection =
+        sourcePages.front().permissions;
+    *maximumProtection =
+        sourcePages.front().permissions;
+    lock.unlock();
+    InvalidateAllGuestJits(*target, size);
+    return KERN_SUCCESS;
 }
 
 u32 Dynarmic_direct_mmap(

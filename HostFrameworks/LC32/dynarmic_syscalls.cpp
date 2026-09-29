@@ -1341,6 +1341,85 @@ guest_mach_msg_trap(u32 guest_msg,
             }
             break;
         }
+        case 3814: { // vm_remap
+            /* The guest sends vm_address_t fields and one task descriptor.
+             * The host's LP64 MIG structure cannot decode this ARM32 wire
+             * layout, and guest addresses name the emulator's own map. */
+            struct __attribute__((packed, aligned(4))) VmRemapRequest32 {
+                mach_msg_header_t Head;
+                mach_msg_body_t Body;
+                mach_msg_port_descriptor_t sourceTask;
+                NDR_record_t NDR;
+                u32 targetAddress;
+                u32 size;
+                u32 mask;
+                int flags;
+                u32 sourceAddress;
+                boolean_t copy;
+                vm_inherit_t inheritance;
+            };
+            struct __attribute__((packed, aligned(4))) VmRemapReply32 {
+                mach_msg_header_t Head;
+                NDR_record_t NDR;
+                kern_return_t RetCode;
+                u32 targetAddress;
+                vm_prot_t currentProtection;
+                vm_prot_t maximumProtection;
+            };
+            static_assert(sizeof(VmRemapRequest32) == 76,
+                "unexpected ARM32 vm_remap request layout");
+            static_assert(sizeof(VmRemapReply32) == 48,
+                "unexpected ARM32 vm_remap reply layout");
+
+            if (rcv_size < sizeof(VmRemapReply32)) {
+                host_header->msgh_size = sizeof(VmRemapReply32);
+                result = MACH_RCV_TOO_LARGE;
+                break;
+            }
+            kern_return_t remapResult = MIG_BAD_ARGUMENTS;
+            u32 targetAddress = 0;
+            vm_prot_t currentProtection = VM_PROT_NONE;
+            vm_prot_t maximumProtection = VM_PROT_NONE;
+            if (send_size == sizeof(VmRemapRequest32) &&
+                    (request_bits & MACH_MSGH_BITS_COMPLEX) != 0) {
+                const auto request = *reinterpret_cast<
+                    const VmRemapRequest32 *>(host_header);
+                if (request.Body.msgh_descriptor_count == 1 &&
+                        request.sourceTask.type ==
+                            MACH_MSG_PORT_DESCRIPTOR) {
+                    if (request.Head.msgh_request_port ==
+                            mach_task_self() &&
+                            request.sourceTask.name ==
+                                mach_task_self()) {
+                        targetAddress = request.targetAddress;
+                        remapResult = RemapGuestVmMemory(
+                            request.sourceAddress,
+                            &targetAddress, request.size,
+                            request.mask, request.flags,
+                            request.copy != 0,
+                            &currentProtection,
+                            &maximumProtection);
+                    } else {
+                        remapResult = KERN_INVALID_ARGUMENT;
+                    }
+                }
+            }
+
+            auto *reply = reinterpret_cast<
+                VmRemapReply32 *>(host_header);
+            reply->NDR = NDR_record;
+            reply->RetCode = remapResult;
+            if (remapResult == KERN_SUCCESS) {
+                reply->targetAddress = targetAddress;
+                reply->currentProtection = currentProtection;
+                reply->maximumProtection = maximumProtection;
+                host_header->msgh_size = sizeof(*reply);
+            } else {
+                host_header->msgh_size =
+                    sizeof(mig_reply_error_t);
+            }
+            break;
+        }
         case 3825: { // mach_make_memory_entry_64
             struct __attribute__((packed, aligned(4)))
                     MakeMemoryEntryRequest32 {
@@ -5083,26 +5162,6 @@ kern_return_t guest_mk_timer_cancel(
         return KERN_FAILURE;
     }
     return result;
-}
-
-static bool GuestVmRangeHasMappingLocked(
-        u64 address, u64 size) {
-    if (sharedHandle.memory == nullptr || size == 0 ||
-            (address & DYN_PAGE_MASK) != 0 ||
-            (size & DYN_PAGE_MASK) != 0 ||
-            !GuestAddressRangeIsValid32(address, size)) {
-        return false;
-    }
-
-    khash_t(memory) *memory = sharedHandle.memory;
-    const u64 end = address + size;
-    for (u64 page = address; page < end;
-            page += DYN_PAGE_SIZE) {
-        if (kh_get(memory, memory, page) != kh_end(memory)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 kern_return_t guest__kernelrpc_mach_vm_protect_trap(

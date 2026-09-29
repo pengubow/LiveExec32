@@ -473,6 +473,12 @@ void InvalidateGuestMemoryLookupCaches();
 bool GuestAddressRangeIsValid32(u64 address, u64 size);
 kern_return_t CopyGuestVmMemory(
     u32 source, u32 destination, u32 size);
+extern "C" kern_return_t RemapGuestVmMemory(
+    u32 source, u32 *target, u32 size, u32 mask,
+    int flags, bool copy, vm_prot_t *currentProtection,
+    vm_prot_t *maximumProtection);
+extern "C" bool GuestVmRangeHasMappingLocked(
+    u64 address, u64 size);
 bool GuestProtectionIsValid(int protection);
 bool guest_memory_range_has_permissions(
     u64 address, size_t size, int requiredPermissions);
