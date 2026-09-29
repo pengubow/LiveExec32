@@ -526,31 +526,10 @@ CFTypeID KnownTypeID(uint32_t typeValue) {
  * the guest dyld for its ARM32 symbol instead.
  */
 u32 GuestBundleFunctionPointer(NSBundle *bundle, NSString *functionName) {
-    if(!bundle || !functionName.length || !threadHandle.jit ||
-       !sharedHandle.fs || !sharedHandle.guest_dlsym) {
-        return 0;
-    }
+    if(!bundle || !functionName.length) return 0;
 
     const char *hostExecutable = bundle.executablePath.fileSystemRepresentation;
-    if(!hostExecutable || !hostExecutable[0]) return 0;
-
-    char guestExecutable[PATH_MAX] = {};
-    if(!sharedHandle.fs->pathHostToGuest(
-            hostExecutable, guestExecutable) || !guestExecutable[0]) {
-        return 0;
-    }
-
-    const u32 guestDlopen = guest_dlsym("dlopen");
-    if(!guestDlopen) return 0;
-
-    DynarmicGuestStackString guestPath(guestExecutable);
-    u32 dlopenArgs[] = {
-        guestPath.guestPtr,
-        static_cast<u32>(RTLD_LAZY | RTLD_LOCAL),
-    };
-    const u32 handle = static_cast<u32>(LC32InvokeGuestC(
-        guestDlopen, false,
-        sizeof(dlopenArgs) / sizeof(dlopenArgs[0]), dlopenArgs));
+    const u32 handle = LC32LoadGuestImage(hostExecutable);
     if(!handle) return 0;
 
     const char *name = functionName.UTF8String;

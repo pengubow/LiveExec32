@@ -92,6 +92,10 @@ u32 LC32HostToGuestArgument(char *type, u64 value);
 u64 LC32GuestToHostReturnType(char *type, u64 value);
 u64 LC32InvokeGuestSelector(id self, SEL _cmd, u64 arg2, u64 arg3, u64 arg4, u64 arg5, u64 arg6, u64 arg7, ...);
 u32 guest_dlsym(const char *host_name);
+// Loads the ARM32 image corresponding to a native executable path through
+// the guest filesystem and loader. Successful handles stay open because
+// Objective-C classes remain registered for the process lifetime.
+u32 LC32LoadGuestImage(const char *host_path);
 u32 guest_free(u32 guest_ptr);
 u32 guest_class_copyIvarList(u32 guest_cls, unsigned int *outCount);
 u32 guest_class_copyMethodList(u32 guest_cls, unsigned int *outCount);

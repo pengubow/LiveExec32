@@ -5735,6 +5735,41 @@ u32 guest_dlsym(const char *host_name) {
     return LC32InvokeGuestC(sharedHandle.guest_dlsym, false, sizeof(args)/sizeof(*args), args);
 }
 
+u32 LC32LoadGuestImage(const char *hostPath) {
+    if(!hostPath || !hostPath[0] || !threadHandle.jit ||
+       !sharedHandle.fs || !sharedHandle.guest_dlsym) {
+        return 0;
+    }
+
+    // Native Catalyst frameworks live below iOSSupport; their guest copies
+    // use the same /System/Library paths as on an iPhone.
+    static constexpr char catalystPrefix[] = "/System/iOSSupport";
+    if(strncmp(hostPath, catalystPrefix,
+            sizeof(catalystPrefix) - 1) == 0 &&
+       hostPath[sizeof(catalystPrefix) - 1] == '/') {
+        hostPath += sizeof(catalystPrefix) - 1;
+    }
+
+    char guestPath[PATH_MAX] = {};
+    if(!sharedHandle.fs->pathHostToGuest(hostPath, guestPath) ||
+       !guestPath[0]) {
+        return 0;
+    }
+
+    static std::atomic<u32> cache{0};
+    const u32 guestDlopen = LC32CachedGuestSymbol(cache, "dlopen");
+    if(!guestDlopen) return 0;
+
+    DynarmicGuestStackString path(guestPath);
+    u32 arguments[] = {
+        path.guestPtr,
+        static_cast<u32>(RTLD_LAZY | RTLD_LOCAL),
+    };
+    return static_cast<u32>(LC32InvokeGuestC(
+        guestDlopen, false,
+        sizeof(arguments) / sizeof(arguments[0]), arguments));
+}
+
 u32 guest_free(u32 guest_ptr) {
     static std::atomic<u32> cache{0};
     const u32 guestPtr = LC32CachedGuestSymbol(cache, "free");
@@ -7067,6 +7102,25 @@ static Class LC32NativeProxyPhysicalClass(id object) {
     }
     if(LC32GuestMirrorIsRetiring(self)) return 0;
 
+    if(object_isClass(self)) {
+        Class hostClass = (Class)self;
+        const char *className = class_getName(hostClass);
+        ptr = guest_objc_getClass(className);
+        if(!ptr && LC32LoadGuestImage(class_getImageName(hostClass))) {
+            ptr = guest_objc_getClass(className);
+        }
+        if(!ptr) {
+            fprintf(stderr,
+                "LC32: missing guest class %s; refusing to substitute "
+                "its superclass\n", className);
+            return 0;
+        }
+        if(class_isMetaClass(hostClass)) {
+            ptr = guest_object_getClass(ptr);
+        }
+        return self.guest_self = ptr;
+    }
+
     /* NSProxy may forward -class to its target. Bridge bookkeeping must pair
      * the proxy itself, without invoking its application forwarding path. */
     Class proxyClass = LC32NativeProxyPhysicalClass(self);
@@ -7098,13 +7152,6 @@ static Class LC32NativeProxyPhysicalClass(id object) {
         LC32_DEBUG_PRINTF("LC32: mapping host class %s through guest superclass %s\n",
             className, class_getName(matchedHostClass));
     }
-    if(object_isClass(self)) {
-        if(proxyClass && class_isMetaClass(proxyClass)) {
-            ptr = guest_object_getClass(ptr);
-        }
-        return self.guest_self = ptr;
-    }
-
     static std::atomic<u32> guestSetHostSelfCache{0};
     const u32 guest_setHost_self = LC32CachedGuestSelector(
         guestSetHostSelfCache, "initWithHostSelf:");
