@@ -676,8 +676,6 @@ static void *RunNativeGuestThread(void *opaque) {
                     std::memory_order_acquire)) {
             runtime->workqueueHostBlocked.store(
                 false, std::memory_order_release);
-            runtime->workqueueCompensationPending.store(
-                false, std::memory_order_release);
             /* The registry no longer counts this worker. Fill the newly
              * available bounded slot before publishing runtime->exited; a
              * pump must never reap and pthread_join its own host thread. */
@@ -1600,14 +1598,13 @@ void NativeGuestWorkqueueHostBlockEnter() {
     }
     nativeGuestRuntime->workqueueHostBlocked.store(
         true, std::memory_order_release);
-    nativeGuestRuntime->workqueueCompensationPending.store(
-        true, std::memory_order_release);
     /*
-     * XNU compensates for a constrained workqueue thread which blocks in the
-     * kernel.  Without that compensation a single requested root worker can
-     * sleep in libnotify while unrelated dispatch work remains queued.
+     * An explicit worker request or a direct event may already be pending
+     * when this worker blocks. Recheck those jobs after recording its state.
+     * Starting an unrequested root worker would make libdispatch decrement a
+     * root queue's pending-worker count below zero.
      */
-    (void)PumpGuestWorkqueue();
+    PumpGuestWorkqueue();
 }
 
 void NativeGuestWorkqueueHostBlockExit() {
@@ -1616,8 +1613,6 @@ void NativeGuestWorkqueueHostBlockExit() {
         return;
     }
     if (--nativeGuestWorkqueueHostBlockDepth == 0) {
-        nativeGuestRuntime->workqueueCompensationPending.store(
-            false, std::memory_order_release);
         nativeGuestRuntime->workqueueHostBlocked.store(
             false, std::memory_order_release);
     }
