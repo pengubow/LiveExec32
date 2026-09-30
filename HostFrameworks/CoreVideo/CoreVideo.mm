@@ -4,6 +4,7 @@
 #include "../../GuestFrameworks/CoreVideo/LC32CoreVideoBridge.h"
 #include <algorithm>
 #include <cstring>
+#include <dlfcn.h>
 
 namespace {
 
@@ -280,8 +281,14 @@ extern "C" u32 LC32_CoreVideo_Dispatch(u32 operation, u32 guestCall) {
                 if(V(i + 1)) Write(V(i + 1), coordinates[i]);
             return 0;
         }
-        case LC32CVImageBufferGetColorSpace:
-            NEED(1); return PIXEL ? Borrowed(CVImageBufferGetColorSpace(PIXEL)) : 0;
+        case LC32CVImageBufferGetColorSpace: {
+            NEED(1);
+            if(!PIXEL) return 0;
+            using GetColorSpace = CGColorSpaceRef (*)(CVImageBufferRef);
+            static const auto getColorSpace = reinterpret_cast<GetColorSpace>(
+                dlsym(RTLD_DEFAULT, "CVImageBufferGetColorSpace"));
+            return getColorSpace ? Borrowed(getColorSpace(PIXEL)) : 0;
+        }
         case LC32CVImageBufferGetEncodedSize:
         case LC32CVImageBufferGetDisplaySize: {
             NEED(2);
