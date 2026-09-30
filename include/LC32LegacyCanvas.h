@@ -2,8 +2,36 @@
 #define LC32_LEGACY_CANVAS_H
 
 #import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 
+#include <math.h>
 #include <stdint.h>
+
+enum {
+    LC32LegacyPhonePortraitWidth = 320,
+    LC32LegacyPhonePortraitHeight = 480,
+};
+
+static inline BOOL LC32CalculateCanvasFit(CGRect bounds, CGRect viewport,
+        CGAffineTransform rotation, CGFloat maximumScale,
+        CGAffineTransform *transform, CGPoint *center) {
+    const CGRect transformedBounds = CGRectApplyAffineTransform(bounds, rotation);
+    const CGFloat width = fabs(transformedBounds.size.width);
+    const CGFloat height = fabs(transformedBounds.size.height);
+    if(!(width > 0) || !(height > 0) ||
+            !(viewport.size.width > 0) || !(viewport.size.height > 0)) {
+        return NO;
+    }
+    const CGFloat scale = MIN(maximumScale,
+        MIN(viewport.size.width / width, viewport.size.height / height));
+    if(!(scale > 0) || !isfinite(scale)) {
+        return NO;
+    }
+
+    *transform = CGAffineTransformScale(rotation, scale, scale);
+    *center = CGPointMake(CGRectGetMidX(viewport), CGRectGetMidY(viewport));
+    return YES;
+}
 
 typedef enum {
     LC32LegacyIPadCanvasNone,
@@ -15,6 +43,12 @@ typedef struct {
     BOOL supportsPhone;
     BOOL supportsPad;
 } LC32SupportedDeviceFamilies;
+
+static inline BOOL LC32BundleRequestsClassicMode(NSBundle *bundle) {
+    NSDictionary *containerInfo = [NSDictionary dictionaryWithContentsOfFile:
+        [bundle.bundlePath stringByAppendingPathComponent:@"LCAppInfo.plist"]];
+    return [containerInfo[@"classicMode"] boolValue];
+}
 
 static inline LC32SupportedDeviceFamilies LC32BundleSupportedDeviceFamilies(
         NSBundle *bundle) {
@@ -267,10 +301,10 @@ static inline BOOL LC32BundleUsesFixedLandscapeIPadCanvas(
 }
 
 /* Pre-iPhone-5 phone applications without 568-point launch art were given a
- * fixed 320x480 logical screen by iOS, even on larger devices.  SDK zero is
- * intentional here: early LC_VERSION_MIN_IPHONEOS commands encode it as
- * "n/a", whereas a missing host getter is filtered by the guest caller. */
-static inline BOOL LC32BundleUsesFixedLandscapePhoneCanvas(
+ * fixed 320x480 logical screen by iOS, even on larger devices. SDK zero is
+ * intentional here: early executables may have no SDK load command, whereas
+ * a missing host getter is filtered by the guest caller. */
+static inline BOOL LC32BundleUsesFixedPhoneScreen(
         NSBundle *bundle, uint32_t sdkVersion) {
     const LC32SupportedDeviceFamilies families =
         LC32BundleSupportedDeviceFamilies(bundle);
@@ -280,7 +314,15 @@ static inline BOOL LC32BundleUsesFixedLandscapePhoneCanvas(
     }
     NSDictionary *info = [bundle infoDictionary];
     return LC32BundleContainsPhoneLaunchArt(bundle, info) &&
-        !LC32BundleContainsTallPhoneLaunchArt(bundle, info) &&
+        !LC32BundleContainsTallPhoneLaunchArt(bundle, info);
+}
+
+static inline BOOL LC32BundleUsesFixedLandscapePhoneCanvas(
+        NSBundle *bundle, uint32_t sdkVersion) {
+    if(!LC32BundleUsesFixedPhoneScreen(bundle, sdkVersion)) {
+        return NO;
+    }
+    return
         LC32BundleUsesLandscapeOnlyPhonePolicy(bundle) &&
         LC32BundleDeclaresStableLandscapeSide(bundle);
 }

@@ -4,6 +4,8 @@
 # Example focused run (temporarily foregrounds only its own fixture apps):
 #   sh test/uikit_legacy_rootless_rotation.sh --device UDID --sdk 6.1 \
 #       --case modern-explicit --case modern-refresh --case ownership --case lifecycle
+# Native Classic Mode canvas preservation:
+#   sh test/uikit_legacy_rootless_rotation.sh --device UDID --sdk 6.1 --case classic-canvas
 # --sdk and --case may be repeated; omitted filters run the complete matrix.
 set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -25,7 +27,7 @@ while [ "$#" -gt 0 ]; do
         --case)
             [ "$#" -ge 2 ] || exit 2
             case "$2" in
-                rootless|explicit|modern|modern-explicit|modern-only|modern-refresh|unregistered|manual|manual-controller|modal|manual-disabled|lifecycle|ownership|replacement)
+                rootless|explicit|modern|modern-explicit|modern-only|modern-refresh|classic-canvas|fullscreen-canvas|classic-wide-policy|fullscreen-wide-policy|portrait-canvas|portrait-canvas-nested|unregistered|manual|manual-controller|modal|manual-disabled|lifecycle|ownership|replacement)
                     test_cases="$test_cases $2" ;;
                 *) exit 2 ;;
             esac
@@ -34,7 +36,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$sdks" ] || sdks="2 5 6.1 7 8 11"
-[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-only modern-refresh unregistered manual manual-controller modal manual-disabled lifecycle ownership replacement"
+[ -n "$test_cases" ] || test_cases="rootless explicit modern modern-explicit modern-only modern-refresh classic-canvas fullscreen-canvas classic-wide-policy fullscreen-wide-policy portrait-canvas portrait-canvas-nested unregistered manual manual-controller modal manual-disabled lifecycle ownership replacement"
 case "$run_timeout" in ''|*[!0-9]*) echo "invalid timeout" >&2; exit 2 ;; esac
 [ "$run_timeout" -ge 1 ] && [ "$run_timeout" -le 60 ] || exit 2
 temp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
@@ -69,6 +71,7 @@ xcrun --sdk iphonesimulator clang -target arm64-apple-ios15.0-simulator \
     -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -lc++ \
     "$repo_root/test/uikit_legacy_rootless_rotation.m" \
     "$repo_root/HostFrameworks/UIKit/LegacyAutoLayout.mm" \
+    "$repo_root/HostFrameworks/UIKit/LegacyAlerts.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyRotation.mm" -o "$workdir/test"
 
 for sdk in $sdks; do
@@ -79,6 +82,11 @@ for sdk in $sdks; do
     app="$workdir/sdk$sdk.app"
     bundle="org.liveexec32.test.rootlessrotation.$run_id.sdk$sdk"
     mkdir "$app"
+    cat > "$app/LCAppInfo.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>classicMode</key><true/></dict></plist>
+PLIST
     plist="$app/Info.plist"
     plutil -create xml1 "$plist"
     plutil -insert CFBundleExecutable -string RootlessRotation "$plist"
@@ -103,8 +111,20 @@ for sdk in $sdks; do
     [ "$build_only" -eq 0 ] || continue
 
     installed_bundle=$bundle
-    bounded "$run_timeout" xcrun simctl install "$device" "$app"
     for test_case in $test_cases; do
+        classic_requested=YES
+        case "$test_case" in fullscreen-*) classic_requested=NO ;; esac
+        plutil -replace classicMode -bool "$classic_requested" "$app/LCAppInfo.plist"
+        if [ "$test_case" = portrait-canvas ] || [ "$test_case" = portrait-canvas-nested ]; then
+            orientations='["UIInterfaceOrientationPortrait","UIInterfaceOrientationPortraitUpsideDown"]'
+        elif [ "$test_case" = classic-wide-policy ] || [ "$test_case" = fullscreen-wide-policy ]; then
+            orientations='["UIInterfaceOrientationPortrait","UIInterfaceOrientationPortraitUpsideDown","UIInterfaceOrientationLandscapeRight","UIInterfaceOrientationLandscapeLeft"]'
+        else
+            orientations='["UIInterfaceOrientationLandscapeRight","UIInterfaceOrientationLandscapeLeft"]'
+        fi
+        plutil -replace UISupportedInterfaceOrientations -json "$orientations" "$app/Info.plist"
+        codesign --force --sign - "$app" >/dev/null 2>&1
+        bounded "$run_timeout" xcrun simctl install "$device" "$app"
         log="$workdir/sdk$sdk-$test_case.log"
         status=0
         bounded "$run_timeout" xcrun simctl launch --console "$device" "$bundle" \

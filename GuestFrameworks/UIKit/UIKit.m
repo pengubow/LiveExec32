@@ -130,7 +130,7 @@ static uint64_t LC32HostUIAccessibilityIsGuidedAccessEnabled;
 static pthread_once_t LC32LegacyCanvasOnce = PTHREAD_ONCE_INIT;
 static BOOL LC32LegacyIPadCanvasRequired;
 static BOOL LC32LegacyIPadStatusBarHidden;
-static BOOL LC32LegacyPhoneCanvasRequired;
+static BOOL LC32LegacyPhoneScreenRequired;
 static pthread_once_t LC32LegacyUniqueIdentifierOnce = PTHREAD_ONCE_INIT;
 static NSString *LC32LegacyUniqueIdentifierFallback;
 
@@ -186,21 +186,22 @@ static void LC32ResolveLegacyUniqueIdentifierFallback(void) {
 }
 
 static void LC32ResolveLegacyCanvas(void) {
-    if(!LC32GuestUIKitLegacyCompatibilityEnabled()) return;
     NSBundle *bundle = NSBundle.mainBundle;
     NSDictionary *info = bundle.infoDictionary;
     const uint64_t getter = LC32Dlsym(
         "LC32GetGuestExecutableSDKVersion", YES);
     const uint32_t sdkVersion = getter
         ? LC32InvokeHostCRet32(getter) : 0;
+    LC32LegacyPhoneScreenRequired = getter &&
+        LC32BundleUsesFixedPhoneScreen(bundle, sdkVersion);
+    LC32LegacyIPadStatusBarHidden = [[info objectForKey:
+        @"UIStatusBarHidden"] boolValue];
+    if(!LC32GuestUIKitLegacyCompatibilityEnabled()) return;
+
     const LC32LegacyIPadCanvasKind canvasKind =
         LC32BundleLegacyIPadCanvasKind(bundle, sdkVersion);
     LC32LegacyIPadCanvasRequired =
         canvasKind != LC32LegacyIPadCanvasNone;
-    LC32LegacyPhoneCanvasRequired = getter &&
-        LC32BundleUsesFixedLandscapePhoneCanvas(bundle, sdkVersion);
-    LC32LegacyIPadStatusBarHidden = [[info objectForKey:
-        @"UIStatusBarHidden"] boolValue];
 }
 
 static BOOL LC32RequiresLegacyIPadCanvas(void) {
@@ -218,9 +219,9 @@ static BOOL LC32ScreenNeedsLegacyIPadCanvas(CGRect hostBounds) {
     return shortEdge > 0 && shortEdge < 600;
 }
 
-static BOOL LC32RequiresFixedLandscapePhoneCanvas(void) {
+static BOOL LC32RequiresFixedPhoneScreen(void) {
     pthread_once(&LC32LegacyCanvasOnce, LC32ResolveLegacyCanvas);
-    return LC32LegacyPhoneCanvasRequired;
+    return LC32LegacyPhoneScreenRequired;
 }
 
 static CGRect LC32HostScreenRect(UIScreen *screen, SEL selector) {
@@ -246,7 +247,7 @@ static void LC32ResolveLegacyScreenCoordinates(void) {
     const uint32_t sdkVersion = getter
         ? LC32InvokeHostCRet32(getter) : 0;
     LC32UsesLegacyScreenCoordinates =
-        sdkVersion != 0 && sdkVersion < 0x00080000;
+        getter && sdkVersion < 0x00080000;
 }
 
 static BOOL LC32GuestUsesLegacyScreenCoordinates(void) {
@@ -724,11 +725,11 @@ compatibleWithTraitCollection:nil];
          * application supports only landscape. Engines such as PopCap's
          * apply their own quarter-turn from statusBarOrientation. */
         bounds = CGRectMake(0, 0, 768, 1024);
-    } else if(LC32RequiresFixedLandscapePhoneCanvas()) {
-        /* Pre-iOS-8 UIScreen coordinates stay portrait-oriented. Legacy GL
-         * engines rotate within this surface while the host wrapper presents
-         * it as a 480x320 landscape canvas. */
-        bounds = CGRectMake(0, 0, 320, 480);
+    } else if(LC32RequiresFixedPhoneScreen()) {
+        /* Old phone apps without tall launch art see the original 320x480
+         * logical screen, regardless of the current scene orientation. */
+        bounds = CGRectMake(0, 0,
+            LC32LegacyPhonePortraitWidth, LC32LegacyPhonePortraitHeight);
     }
     return bounds;
 }
@@ -741,10 +742,12 @@ compatibleWithTraitCollection:nil];
         frame = LC32LegacyIPadStatusBarHidden
             ? CGRectMake(0, 0, 768, 1024)
             : CGRectMake(0, 20, 768, 1004);
-    } else if(LC32RequiresFixedLandscapePhoneCanvas()) {
+    } else if(LC32RequiresFixedPhoneScreen()) {
         frame = LC32LegacyIPadStatusBarHidden
-            ? CGRectMake(0, 0, 320, 480)
-            : CGRectMake(0, 20, 320, 460);
+            ? CGRectMake(0, 0,
+                LC32LegacyPhonePortraitWidth, LC32LegacyPhonePortraitHeight)
+            : CGRectMake(0, 20, LC32LegacyPhonePortraitWidth,
+                LC32LegacyPhonePortraitHeight - 20);
     }
     return frame;
 }
@@ -760,7 +763,7 @@ compatibleWithTraitCollection:nil];
         &hostSelector, _cmd, NO);
     CGFloat scale = (CGFloat)LC32HostFloatingResult(LC32InvokeHostSelector(
         self.host_self, selector, (uint64_t)0));
-    if(LC32RequiresFixedLandscapePhoneCanvas() && scale > 2.0f) {
+    if(LC32RequiresFixedPhoneScreen() && scale > 2.0f) {
         scale = 2.0f;
     }
     return scale;

@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #include <mach-o/loader.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,6 +35,30 @@ static BOOL LC32EnableLegacyLayoutPolicy(id, SEL) {
     return YES;
 }
 
+using LC32NativeLayoutHostPolicy = BOOL (*)(id, SEL);
+static LC32NativeLayoutHostPolicy LC32OriginalLayoutHostPolicy;
+static const char *const LC32NativeLayoutHostClasses[] = {
+    "UITrackingWindowView",
+    "UIInputSetContainerView",
+    "_UIAlertControllerPhoneTVMacView",
+};
+
+static BOOL LC32LegacyNativeLayoutHostPolicy(id view, SEL selector) {
+    // TextInputUI can load its tracking view after our +load. Testing the
+    // receiver's class here also covers that late load without modifying
+    // an image while the Objective-C runtime holds its loading lock.
+    for(Class cls = object_getClass(view); cls;
+            cls = class_getSuperclass(cls)) {
+        const char *name = class_getName(cls);
+        for(const char *hostName : LC32NativeLayoutHostClasses) {
+            if(strcmp(name, hostName) != 0) continue;
+            return YES;
+        }
+    }
+    const BOOL allowed = LC32OriginalLayoutHostPolicy(view, selector);
+    return allowed;
+}
+
 @interface LC32LegacyAutoLayout : NSObject
 @end
 
@@ -59,18 +84,24 @@ static BOOL LC32EnableLegacyLayoutPolicy(id, SEL) {
     }
 
     /* Legacy UIWindow rotation explicitly makes its root an engine host.
-     * UIKit's modern text-effects and remote-keyboard roots have
+     * UIKit's modern alert, text-effects and remote-keyboard roots have
      * translatesAutoresizingMaskIntoConstraints == NO, which the old host
      * invariant rejects when an overlay/keyboard opens in landscape. Opt
-     * just those native classes into hosting without autoresizing constraints;
-     * do not change their authored constraints or relax the UIView default. */
+     * just those native classes into hosting without autoresizing constraints.
+     * The inherited base policy handles views loaded later too; unrelated
+     * views and subclass overrides retain their native answer. */
     selector = sel_registerName("_hostsLayoutEngineAllowsTAMIC_NO");
-    for(NSString *className in @[@"UITrackingWindowView", @"UIInputSetContainerView"]) {
-        Class hostClass = NSClassFromString(className);
+    method = class_getInstanceMethod(viewClass, selector);
+    if(!method) return;
+    LC32OriginalLayoutHostPolicy = (LC32NativeLayoutHostPolicy)
+        method_getImplementation(method);
+    method_setImplementation(method, (IMP)LC32LegacyNativeLayoutHostPolicy);
+    for(const char *className : LC32NativeLayoutHostClasses) {
+        Class hostClass = objc_getClass(className);
         method = hostClass ? class_getInstanceMethod(hostClass, selector) : NULL;
         if(method) {
             class_replaceMethod(hostClass, selector,
-                (IMP)LC32EnableLegacyLayoutPolicy, method_getTypeEncoding(method));
+                (IMP)LC32LegacyNativeLayoutHostPolicy, method_getTypeEncoding(method));
         }
     }
 }

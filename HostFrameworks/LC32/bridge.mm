@@ -6,6 +6,7 @@
 #include "LC32CoreMediaTimeABI.h"
 #include "LC32DebugLog.h"
 #import "../UIKit/LegacyNibLoading.h"
+#import "../UIKit/LC32LegacyRotation.h"
 
 #import <dispatch/dispatch.h>
 #import <mach/mach_init.h>
@@ -3319,6 +3320,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
                 selector == @selector(setBounds:) ||
                 selector == @selector(setCenter:) ||
                 selector == @selector(setFrame:)) {
+            LC32NativeLegacyRotationDidSetGuestViewGeometry(receiver);
             LC32UIKitScheduleLegacyOverlayLayout(receiver, nil);
         } else if(selector == @selector(addSubview:)) {
             LC32UIKitScheduleLegacyOverlayLayout(

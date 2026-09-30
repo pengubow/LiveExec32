@@ -12,12 +12,33 @@
 #include <stdlib.h>
 #include <string.h>
 #include "LC32LegacyRotation.h"
+#include "LC32LegacyScenes.h"
 
 /* Native-only fixture: compile the actual LegacyRotation.mm implementation,
  * not the emulator or guest selector bridge. Explicit registration stands in
  * for the bridge's classification of guest-created controller classes. */
 static BOOL guestCallsAllowed = YES;
 BOOL LC32NativeLegacyRotationCanCallGuest(void) { return guestCallsAllowed; }
+
+UIInterfaceOrientationMask LC32NativeLegacyRendererSupportedOrientations(
+        UIViewController *controller) {
+    // This native fixture has no guest bridge or startup mask cache. Match
+    // its safe authored-policy boundary; the guest fixture covers caching.
+    if(!guestCallsAllowed || !controller ||
+            !LC32LegacyRendererUsesNativeInitialOrientation(object_getClass(controller))) {
+        return 0;
+    }
+    return [controller supportedInterfaceOrientations];
+}
+
+// The fixture exercises rotation without linking the selector bridge used by
+// the production scene observer. Record the observer request at that boundary.
+static unsigned classicCanvasObservationCalls;
+void LC32ObserveClassicCanvasScene(UIWindowScene *scene) {
+    if(!scene || [scene isKindOfClass:UIWindowScene.class]) {
+        ++classicCanvasObservationCalls;
+    }
+}
 
 static int failures;
 static unsigned legacyQueries;
@@ -31,6 +52,11 @@ static BOOL explicitRootCase;
 static BOOL expectedEnabled;
 static BOOL originalNativeRotationPolicy;
 static NSString *testCase;
+
+static BOOL IsCanvasTestCase(void) {
+    return [@[@"classic-canvas", @"fullscreen-canvas",
+        @"classic-wide-policy", @"fullscreen-wide-policy"] containsObject:testCase];
+}
 
 /* The production original-method aliases are replaced only during the
  * synchronous ownership probe. No UIKit work runs with these stubs installed.
@@ -176,6 +202,7 @@ static uint32_t executableSDK(void) {
 @interface RootlessRotationRefreshWindow : UIWindow
 @property(nonatomic) BOOL recordRefreshes;
 @property(nonatomic) unsigned refreshes;
+@property(nonatomic) unsigned orientationUpdates;
 @end
 @implementation RootlessRotationRefreshWindow
 - (void)_updateTransformLayer {
@@ -186,7 +213,60 @@ static uint32_t executableSDK(void) {
             &parent, sel_registerName("_updateTransformLayer"));
     }
 }
+
+- (void)_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
+        duration:(NSTimeInterval)duration force:(BOOL)force {
+    if(self.recordRefreshes) {
+        ++self.orientationUpdates;
+        return;
+    }
+    struct objc_super parent = {self, UIWindow.class};
+    ((void (*)(struct objc_super *, SEL, UIInterfaceOrientation,
+        NSTimeInterval, BOOL))objc_msgSendSuper)(&parent,
+        sel_registerName("_updateToInterfaceOrientation:duration:force:"),
+        orientation, duration, force);
+}
 @end
+
+static UIDeviceOrientation deviceOrientationProbe;
+
+static UIDeviceOrientation nativeDeviceOrientationProbe(__unused id device,
+        __unused SEL selector) {
+    return deviceOrientationProbe;
+}
+
+@interface RootlessRotationAlertScene : NSObject
+@property(nonatomic) UIInterfaceOrientation interfaceOrientation;
+@property(nonatomic, copy) NSArray<UIWindow *> *windows;
+@end
+@implementation RootlessRotationAlertScene
+@end
+
+static __unsafe_unretained UIWindowScene *alertSceneProbe;
+static unsigned alertSceneRotationCalls;
+static unsigned alertSceneBackingCalls;
+static UIInterfaceOrientation alertSceneRequestedOrientation;
+static BOOL alertSceneRotationArguments;
+
+static UIWindowScene *nativeAlertSceneGetter(__unused id window,
+        __unused SEL selector) {
+    return alertSceneProbe;
+}
+
+static BOOL nativeAlertVisibleGetter(__unused id window, __unused SEL selector) {
+    return NO;
+}
+
+static void nativeAlertBackingProbe(__unused id window, __unused SEL selector) {
+    ++alertSceneBackingCalls;
+}
+
+static void nativeAlertRotationProbe(__unused id window, __unused SEL selector,
+        UIInterfaceOrientation orientation, NSTimeInterval duration, BOOL force) {
+    ++alertSceneRotationCalls;
+    alertSceneRequestedOrientation = orientation;
+    alertSceneRotationArguments = duration == 0 && force;
+}
 
 static unsigned updateProbeCalls;
 static unsigned updateProbeRefreshes;
@@ -284,6 +364,67 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
 @implementation RootlessRotationRegisteredModernController
 @end
 
+@interface RootlessRotationCanvasLayer : CAEAGLLayer
+@property(nonatomic) BOOL recordGeometryActions;
+@property(nonatomic) unsigned geometryActions;
+@property(nonatomic) unsigned animatedGeometryActions;
+@end
+
+@implementation RootlessRotationCanvasLayer
+- (void)recordGeometryWrite {
+    if(self.recordGeometryActions) {
+        ++self.geometryActions;
+        if(!CATransaction.disableActions || UIView.areAnimationsEnabled) {
+            ++self.animatedGeometryActions;
+        }
+    }
+}
+
+- (void)setBounds:(CGRect)bounds {
+    [self recordGeometryWrite];
+    [super setBounds:bounds];
+}
+
+- (void)setPosition:(CGPoint)position {
+    [self recordGeometryWrite];
+    [super setPosition:position];
+}
+
+- (void)setTransform:(CATransform3D)transform {
+    [self recordGeometryWrite];
+    [super setTransform:transform];
+}
+@end
+
+@interface RootlessRotationClassicCanvasView : UIView
+@end
+
+@implementation RootlessRotationClassicCanvasView
++ (Class)layerClass {
+    return RootlessRotationCanvasLayer.class;
+}
+@end
+
+/* A Cocos-style root declares landscape policy and lets UIKit turn the view.
+ * It has no engine-owned rotation callbacks or preferred-orientation method. */
+@interface RootlessRotationStartupCanvasController : UIViewController
+@end
+
+@implementation RootlessRotationStartupCanvasController
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskLandscape;
+}
+
+- (BOOL)shouldAutorotate {
+    return YES;
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)orientation {
+    ++legacyQueries;
+    return UIInterfaceOrientationIsLandscape(orientation);
+}
+@end
+
 /* iOS 6 policy with the pre-iOS-8 lifecycle, but no deprecated policy query
  * anywhere in the hierarchy (the Unity controller shape). */
 @interface RootlessRotationPolicyOnlyController : UIViewController
@@ -335,6 +476,162 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
 @end
 
 @implementation RootlessRotationDelegate
+- (void)checkPortraitRendererCanvas {
+    LC32PrepareNativeLegacyRotationClass(RootlessRotationRegisteredModernController.class);
+    guestCallsAllowed = NO;
+    const CGRect viewport = UIScreen.mainScreen.bounds;
+    UIWindow *window = [[UIWindow alloc] initWithFrame:viewport];
+    UIViewController *controller = [RootlessRotationRegisteredModernController new];
+    UIView *renderer = [[RootlessRotationClassicCanvasView alloc] initWithFrame:viewport];
+    controller.view = renderer;
+    window.rootViewController = controller;
+    UIView *parent = window;
+    const BOOL nested = [testCase isEqualToString:@"portrait-canvas-nested"];
+    if(nested) {
+        parent = [[UIView alloc] initWithFrame:viewport];
+        parent.bounds = CGRectOffset(viewport,
+            viewport.size.width * 0.04, viewport.size.height * 0.03);
+        [window addSubview:parent];
+    }
+    if(renderer.superview != parent) [parent addSubview:renderer];
+    const CGRect initialParentBounds = parent.bounds;
+    renderer.transform = CGAffineTransformIdentity;
+    renderer.bounds = CGRectMake(0, 0, viewport.size.width, viewport.size.height);
+    renderer.center = CGPointMake(CGRectGetMidX(viewport), CGRectGetMidY(viewport));
+    renderer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    LC32FitNativeLegacyRendererCanvas(window);
+    check("portrait-canvas-attachment-does-not-freeze-launch-layout",
+        renderer.autoresizingMask == UIViewAutoresizingFlexibleWidth);
+
+    // Reproduce a guest's frame assignment after its root has been attached.
+    const CGFloat inset = viewport.size.height * 0.04;
+    renderer.frame = CGRectMake(0, inset, viewport.size.width, viewport.size.height - inset);
+    const CGRect authoredBounds = renderer.bounds;
+    const CGPoint authoredCenter = renderer.center;
+    const CGPoint authoredWindowCenter =
+        [window convertPoint:authoredCenter fromView:parent];
+    LC32FinishNativeLegacyRotationStartup();
+    LC32FitNativeLegacyRendererCanvas(window);
+    check("portrait-canvas-final-launch-layout-preserved",
+        CGRectEqualToRect(renderer.bounds, authoredBounds) &&
+        CGPointEqualToPoint(renderer.center, authoredCenter) &&
+        CGAffineTransformIsIdentity(renderer.transform) &&
+        renderer.autoresizingMask == UIViewAutoresizingNone);
+
+    const CGRect expanded = CGRectMake(0, 0,
+        viewport.size.width * 1.4, viewport.size.height * 1.8);
+    const CGFloat scale = MIN(expanded.size.width / viewport.size.width,
+        expanded.size.height / viewport.size.height);
+    const CGPoint expectedWindowCenter = CGPointMake(
+        CGRectGetMidX(expanded) + scale *
+            (authoredWindowCenter.x - CGRectGetMidX(viewport)),
+        CGRectGetMidY(expanded) + scale *
+            (authoredWindowCenter.y - CGRectGetMidY(viewport)));
+    const unsigned initialQueries = legacyQueries;
+    const unsigned initialWillCalls = willRotateCalls;
+    const unsigned initialDidCalls = didRotateCalls;
+    for(unsigned cycle = 0; cycle < 3; ++cycle) {
+        window.bounds = expanded;
+        if(nested) {
+            parent.frame = expanded;
+            parent.bounds = CGRectOffset(expanded,
+                viewport.size.width * (0.04 + cycle * 0.01),
+                viewport.size.height * (0.03 + cycle * 0.01));
+        }
+        const CGPoint expectedCenter =
+            [parent convertPoint:expectedWindowCenter fromView:window];
+        RootlessRotationCanvasLayer *layer = (RootlessRotationCanvasLayer *)renderer.layer;
+        layer.recordGeometryActions = YES;
+        layer.geometryActions = 0;
+        layer.animatedGeometryActions = 0;
+        [UIView animateWithDuration:0.5 animations:^{
+            LC32FitNativeLegacyRendererCanvas(window);
+        }];
+        layer.recordGeometryActions = NO;
+        check("portrait-canvas-refit-does-not-inherit-host-animation",
+            layer.geometryActions > 0 && layer.animatedGeometryActions == 0);
+        const unsigned previousActions = layer.geometryActions;
+        layer.recordGeometryActions = YES;
+        LC32FitNativeLegacyRendererCanvas(window);
+        layer.recordGeometryActions = NO;
+        check("portrait-canvas-unchanged-refit-does-not-write-geometry",
+            layer.geometryActions == previousActions);
+
+        // A previous host transition can still animate the presentation
+        // layer after its model geometry has already been restored.
+        CABasicAnimation *resize = [CABasicAnimation animationWithKeyPath:@"bounds.size"];
+        resize.fromValue = [NSValue valueWithCGSize:expanded.size];
+        resize.toValue = [NSValue valueWithCGSize:authoredBounds.size];
+        resize.duration = 10;
+        [layer addAnimation:resize forKey:@"hostCanvasResize"];
+        CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        fade.fromValue = @0.5;
+        fade.toValue = @1;
+        fade.duration = 10;
+        [layer addAnimation:fade forKey:@"unrelatedFade"];
+        LC32FitNativeLegacyRendererCanvas(window);
+        check("portrait-canvas-unchanged-refit-removes-stale-resize-animation",
+            [layer animationForKey:@"hostCanvasResize"] == nil);
+        check("portrait-canvas-refit-preserves-other-animations",
+            [layer animationForKey:@"unrelatedFade"] != nil);
+        [layer removeAnimationForKey:@"unrelatedFade"];
+
+        // Native root layout can follow the scene observer's first fit.
+        renderer.transform = CGAffineTransformIdentity;
+        renderer.frame = CGRectMake(0, inset,
+            expanded.size.width, expanded.size.height - inset);
+        [controller viewDidLayoutSubviews];
+        check("portrait-canvas-resume-preserves-authored-bounds",
+            CGRectEqualToRect(renderer.bounds, authoredBounds));
+        check("portrait-canvas-resume-fits-window-and-preserves-inset",
+            fabs(renderer.transform.a - scale) < 0.001 &&
+            fabs(renderer.transform.d - scale) < 0.001 &&
+            fabs(renderer.center.x - expectedCenter.x) < 0.001 &&
+            fabs(renderer.center.y - expectedCenter.y) < 0.001);
+        const CGPoint guestPoint = CGPointMake(authoredBounds.size.width * 0.3,
+            authoredBounds.size.height * 0.7);
+        const CGPoint displayed = [renderer convertPoint:guestPoint toView:window];
+        const CGPoint returned = [renderer convertPoint:displayed fromView:window];
+        check("portrait-canvas-touch-coordinates-preserved",
+            fabs(returned.x - guestPoint.x) < 0.001 &&
+            fabs(returned.y - guestPoint.y) < 0.001);
+        window.bounds = viewport;
+        if(nested) {
+            parent.frame = viewport;
+            parent.bounds = initialParentBounds;
+        }
+        LC32FitNativeLegacyRendererCanvas(window);
+        check("portrait-canvas-original-viewport-restored",
+            CGPointEqualToPoint(renderer.center, authoredCenter) &&
+            CGAffineTransformIsIdentity(renderer.transform));
+    }
+    check("portrait-canvas-scene-observer-requested",
+        classicCanvasObservationCalls > 0);
+    check("portrait-canvas-does-not-replace-root",
+        window.rootViewController == controller && renderer.superview == parent);
+    check("portrait-canvas-refit-does-not-query-or-rotate-guest",
+        legacyQueries == initialQueries && willRotateCalls == initialWillCalls &&
+        didRotateCalls == initialDidCalls);
+    // An explicit guest write must remain authoritative after capture.
+    const CGRect requestedFrame = CGRectMake(inset, inset,
+        authoredBounds.size.width * 0.8, authoredBounds.size.height * 0.8);
+    renderer.frame = requestedFrame;
+    LC32NativeLegacyRotationDidSetGuestViewGeometry(renderer);
+    CABasicAnimation *move = [CABasicAnimation animationWithKeyPath:@"position"];
+    move.fromValue = [NSValue valueWithCGPoint:authoredCenter];
+    move.toValue = [NSValue valueWithCGPoint:renderer.center];
+    move.duration = 10;
+    [renderer.layer addAnimation:move forKey:@"guestMove"];
+    LC32FitNativeLegacyRendererCanvas(window);
+    [controller viewDidLayoutSubviews];
+    check("portrait-canvas-explicit-guest-geometry-is-preserved",
+        CGRectEqualToRect(renderer.frame, requestedFrame));
+    check("portrait-canvas-explicit-guest-animation-is-preserved",
+        [renderer.layer animationForKey:@"guestMove"] != nil);
+    [renderer.layer removeAnimationForKey:@"guestMove"];
+    guestCallsAllowed = YES;
+}
+
 - (void)dumpState:(const char *)stage {
     printf("rootless-rotation-state: %s case=%s root=%p delegate=%p clients=%s "
         "queries=%u landscape=%u will=%u did=%u frame=%s transform=%s\n",
@@ -379,6 +676,12 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     check("actual-sdk", sdk == expectedSDK);
     check("sdk-gate", LC32NativeLegacyRotationEnabled() == expectedEnabled);
     originalNativeRotationPolicy = nativeRotationPolicy();
+    if([testCase isEqualToString:@"portrait-canvas"] ||
+            [testCase isEqualToString:@"portrait-canvas-nested"]) {
+        [self checkPortraitRendererCanvas];
+        printf("rootless-rotation-regression: %s\n", failures ? "FAIL" : "PASS");
+        exit(failures != 0);
+    }
     SEL maskSelector = @selector(supportedInterfaceOrientations);
     SEL preferredSelector = @selector(preferredInterfaceOrientationForPresentation);
     IMP originalMask = class_getMethodImplementation(
@@ -412,6 +715,7 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     LC32PrepareNativeLegacyRotationClass(RootlessRotationRegisteredModernController.class);
     LC32PrepareNativeLegacyRotationClass(RootlessRotationPolicyOnlyController.class);
     LC32PrepareNativeLegacyRotationClass(RootlessRotationManualController.class);
+    LC32PrepareNativeLegacyRotationClass(RootlessRotationStartupCanvasController.class);
     for(NSUInteger index = 0; index < modernSelectors.count; ++index) {
         check("registered-modern-method-implementation-preserved",
             class_getMethodImplementation(RootlessRotationRegisteredModernController.class,
@@ -506,6 +810,9 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     return YES;
 }
 - (void)finishStartupAndScheduleChecks {
+    if(IsCanvasTestCase()) {
+        [self checkNativeRendererCanvasBeforeStartup:YES];
+    }
     if([testCase isEqualToString:@"modal"]) {
         check("modal-presented-before-startup",
             self.controller.presentedViewController == self.modalController &&
@@ -672,8 +979,11 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         window.refreshes = 0;
         updateProbeCalls = 0;
         IMP saved = method_setImplementation(original, (IMP)nativeOrientationUpdateProbe);
+        // Invoke the production base implementation: this subclass separately
+        // records forced device-observer calls in the notification regression.
+        IMP wrapper = method_getImplementation(update);
         @try {
-            ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))objc_msgSend)(
+            ((void (*)(id, SEL, UIInterfaceOrientation, NSTimeInterval, BOOL))wrapper)(
                 window, selector, UIInterfaceOrientationLandscapeLeft, 0.375, YES);
         } @finally {
             method_setImplementation(original, saved);
@@ -688,6 +998,132 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         window.hidden = YES;
     }
 }
+
+- (void)checkModernDeviceNotifications {
+    const SEL changed = sel_registerName("lc32_nativeLegacyDeviceOrientationChanged:");
+    Method deviceGetter = class_getInstanceMethod(UIDevice.class, @selector(orientation));
+    check("modern-device-observer-entrypoint-present",
+        [UIWindow respondsToSelector:changed] && deviceGetter);
+    if(!expectedEnabled || !deviceGetter) return;
+
+    NSMutableArray<RootlessRotationRefreshWindow *> *windows = [NSMutableArray array];
+    for(Class cls in @[RootlessRotationRegisteredModernController.class,
+            RootlessRotationPolicyOnlyController.class]) {
+        RootlessRotationRefreshWindow *window = [[RootlessRotationRefreshWindow alloc]
+            initWithFrame:CGRectMake(0, 0, 360, 640)];
+        UIViewController *controller = [[cls alloc] init];
+        controller.view = [[UIView alloc] initWithFrame:window.bounds];
+        window.rootViewController = controller;
+        if(controller.view.superview != window) [window addSubview:controller.view];
+        LC32NativeLegacyRotationAdoptDirectRenderer(window, controller);
+        [windows addObject:window];
+        window.recordRefreshes = YES;
+    }
+
+    IMP saved = method_setImplementation(deviceGetter, (IMP)nativeDeviceOrientationProbe);
+    @try {
+        for(NSNumber *orientation in @[@(UIDeviceOrientationLandscapeLeft),
+                @(UIDeviceOrientationLandscapeRight)]) {
+            deviceOrientationProbe = (UIDeviceOrientation)orientation.integerValue;
+            for(RootlessRotationRefreshWindow *window in windows) {
+                window.refreshes = 0;
+                window.orientationUpdates = 0;
+            }
+            ((void (*)(id, SEL, NSNotification *))objc_msgSend)(UIWindow.class,
+                changed, nil);
+            for(RootlessRotationRefreshWindow *window in windows) {
+                check("modern-device-notification-leaves-backing-in-native-transition",
+                    window.refreshes == 0);
+                check("modern-device-notification-does-not-force-scene-client",
+                    window.orientationUpdates == 0);
+            }
+        }
+    } @finally {
+        method_setImplementation(deviceGetter, saved);
+        for(RootlessRotationRefreshWindow *window in windows) {
+            window.recordRefreshes = NO;
+            window.hidden = YES;
+        }
+    }
+    check("modern-device-getter-restored", method_getImplementation(deviceGetter) == saved);
+}
+
+- (void)checkNativeAlertSceneSynchronization {
+    Class alertWindowClass = NSClassFromString(@"_UIAlertControllerShimPresenterWindow");
+    if(!alertWindowClass) {
+        puts("rootless-rotation-native-alert-scene: SKIP (native window absent)");
+        return;
+    }
+    Class probeClass = objc_allocateClassPair(alertWindowClass,
+        "LC32NativeAlertSceneProbeWindow", 0);
+    check("native-alert-probe-class-created", probeClass != Nil);
+    if(!probeClass) return;
+    const SEL selectors[] = {
+        @selector(windowScene), @selector(isHidden),
+        sel_registerName("_updateTransformLayer"),
+        sel_registerName("_updateToInterfaceOrientation:duration:force:"),
+    };
+    const IMP implementations[] = {
+        (IMP)nativeAlertSceneGetter, (IMP)nativeAlertVisibleGetter,
+        (IMP)nativeAlertBackingProbe, (IMP)nativeAlertRotationProbe,
+    };
+    for(unsigned index = 0; index < 4; ++index) {
+        Method method = class_getInstanceMethod(alertWindowClass, selectors[index]);
+        check("native-alert-probe-selector-present", method != NULL);
+        if(!method) {
+            objc_disposeClassPair(probeClass);
+            return;
+        }
+        class_addMethod(probeClass, selectors[index], implementations[index],
+            method_getTypeEncoding(method));
+    }
+    objc_registerClassPair(probeClass);
+
+    UIWindow *window = [[alertWindowClass alloc] initWithFrame:
+        CGRectMake(0, 0, 360, 640)];
+    window.rootViewController = [[UIViewController alloc] init];
+    RootlessRotationAlertScene *scene = [[RootlessRotationAlertScene alloc] init];
+    scene.windows = @[];
+    scene.interfaceOrientation = UIInterfaceOrientationPortrait;
+    alertSceneProbe = (UIWindowScene *)scene;
+    Class originalClass = object_getClass(window);
+    // Record requests at the native window boundary. No visible hierarchy or
+    // scene is modified, and the real class is restored before UIKit resumes.
+    object_setClass(window, probeClass);
+    alertSceneRotationCalls = 0;
+    alertSceneBackingCalls = 0;
+    @try {
+        check("native-alert-scene-sync-sdk-gate",
+            LC32SynchronizeNativeLegacyAlertWindow(window) == expectedEnabled);
+        unsigned expectedCalls = expectedEnabled ? 1 : 0;
+        for(NSNumber *value in @[@(UIInterfaceOrientationLandscapeLeft),
+                @(UIInterfaceOrientationLandscapeRight),
+                @(UIInterfaceOrientationPortrait)]) {
+            scene.interfaceOrientation = (UIInterfaceOrientation)value.integerValue;
+            LC32SynchronizeNativeLegacyAlertWindows((UIWindowScene *)scene);
+            if(expectedEnabled) {
+                ++expectedCalls;
+                check("native-alert-omitted-from-public-list-matches-committed-scene",
+                    alertSceneRotationCalls == expectedCalls &&
+                    alertSceneRequestedOrientation == scene.interfaceOrientation &&
+                    alertSceneRotationArguments);
+                check("native-alert-repeat-refit-handled",
+                    LC32SynchronizeNativeLegacyAlertWindow(window));
+                check("native-alert-repeat-does-not-turn-twice",
+                    alertSceneRotationCalls == expectedCalls &&
+                    alertSceneBackingCalls == expectedCalls - 1);
+            } else {
+                check("native-alert-modern-sdk-unchanged", alertSceneRotationCalls == 0);
+            }
+        }
+        check("native-alert-sync-excludes-ordinary-game-window",
+            !LC32SynchronizeNativeLegacyAlertWindow(self.window));
+    } @finally {
+        object_setClass(window, originalClass);
+        alertSceneProbe = nil;
+    }
+}
+
 - (void)checkModernNativePermission {
     SEL originalSelector = sel_registerName(
         "lc32_shouldAutorotateToInterfaceOrientation:checkForDismissal:isRotationDisabled:");
@@ -809,6 +1245,163 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         });
     });
 }
+- (void)checkNativeRendererCanvasBeforeStartup:(BOOL)beforeStartup {
+    const CGSize sizes[] = { {568, 320}, {640, 360} };
+    const BOOL preserveLaunchSize = [testCase hasPrefix:@"classic-"];
+    const unsigned queries = legacyQueries;
+    const unsigned will = willRotateCalls;
+    const unsigned did = didRotateCalls;
+    const CGAffineTransform rotation = CGAffineTransformMake(0, 1, -1, 0, 0, 0);
+    const BOOL previousGuestPermission = guestCallsAllowed;
+    guestCallsAllowed = NO;
+    @try {
+        for(unsigned index = 0; index < sizeof(sizes) / sizeof(sizes[0]); ++index) {
+            const CGSize size = sizes[index];
+            UIWindow *window = [[UIWindow alloc] initWithFrame:
+                CGRectMake(0, 0, size.height, size.width)];
+            RootlessRotationRegisteredModernController *controller =
+                [RootlessRotationRegisteredModernController new];
+            UIView *renderer = [[RootlessRotationClassicCanvasView alloc]
+                initWithFrame:CGRectMake(0, 20, size.height, size.width - 20)];
+            controller.view = renderer;
+            window.rootViewController = controller;
+            if(renderer.superview != window) [window addSubview:renderer];
+            renderer.transform = CGAffineTransformIdentity;
+            renderer.bounds = CGRectMake(0, 0, size.height, size.width - 20);
+            renderer.center = CGPointMake(size.height * 0.5,
+                (size.width + 20) * 0.5);
+            const CGRect portraitBefore = renderer.bounds;
+            LC32FitNativeLegacyRendererCanvas(window);
+            check("classic-canvas-fullscreen-portrait-startup", CGRectEqualToRect(
+                renderer.bounds, expectedEnabled
+                    ? CGRectMake(0, 0, size.height, size.width) : portraitBefore));
+            renderer.transform = rotation;
+            renderer.bounds = CGRectMake(0, 0, size.width, size.height - 20);
+            renderer.center = CGPointMake(17, 23);
+            renderer.autoresizingMask = UIViewAutoresizingNone;
+            const CGRect clippedBounds = renderer.bounds;
+            LC32FitNativeLegacyRendererCanvas(window);
+            const CGRect canonical = CGRectMake(0, 0, size.width, size.height);
+            check("classic-canvas-fullscreen-landscape-crop-repaired",
+                CGRectEqualToRect(renderer.bounds, expectedEnabled
+                    ? canonical : clippedBounds));
+            renderer.bounds = canonical;
+            LC32FitNativeLegacyRendererCanvas(window);
+            if(expectedEnabled) {
+                check("classic-canvas-initially-centered",
+                    CGPointEqualToPoint(renderer.center, CGPointMake(
+                        size.height * 0.5, size.width * 0.5)));
+            }
+            CABasicAnimation *turn = [CABasicAnimation animationWithKeyPath:@"transform"];
+            turn.fromValue = [NSValue valueWithCATransform3D:
+                CATransform3DMakeAffineTransform(CGAffineTransformInvert(rotation))];
+            turn.toValue = [NSValue valueWithCATransform3D:
+                CATransform3DMakeAffineTransform(rotation)];
+            turn.duration = 10;
+            [renderer.layer addAnimation:turn forKey:@"nativeOrientationTurn"];
+            CABasicAnimation *resize = [CABasicAnimation animationWithKeyPath:@"bounds"];
+            resize.fromValue = [NSValue valueWithCGRect:canonical];
+            resize.toValue = [NSValue valueWithCGRect:clippedBounds];
+            resize.duration = 10;
+            [renderer.layer addAnimation:resize forKey:@"staleCanvasResize"];
+            LC32FitNativeLegacyRendererCanvas(window);
+            check("landscape-canvas-preserves-native-rotation-animation",
+                [renderer.layer animationForKey:@"nativeOrientationTurn"] != nil);
+            check("landscape-canvas-removes-stale-resize-animation",
+                ([renderer.layer animationForKey:@"staleCanvasResize"] == nil) ==
+                    expectedEnabled);
+            [renderer.layer removeAnimationForKey:@"nativeOrientationTurn"];
+            [renderer.layer removeAnimationForKey:@"staleCanvasResize"];
+            for(unsigned cycle = 0; cycle < 3; ++cycle) {
+                window.bounds = CGRectMake(0, 0, 390, 844);
+                const CGPoint before = renderer.center;
+                LC32FitNativeLegacyRendererCanvas(window);
+                check("classic-canvas-resume-drawable-size",
+                    CGRectEqualToRect(renderer.bounds,
+                        expectedEnabled && !preserveLaunchSize
+                            ? CGRectMake(0, 0, 844, 390) : canonical));
+                check("classic-canvas-resume-center", CGPointEqualToPoint(
+                    renderer.center, expectedEnabled ? CGPointMake(195, 422) : before));
+                check("classic-canvas-native-quarter-turn-preserved",
+                    CGAffineTransformEqualToTransform(renderer.transform, rotation));
+                check("classic-canvas-controller-and-hierarchy-preserved",
+                    window.rootViewController == controller &&
+                    renderer.superview == window && renderer.window == window);
+                const CGPoint guestPoint = CGPointMake(71, 129);
+                const CGPoint presented = [renderer convertPoint:guestPoint toView:window];
+                const CGPoint returned = [renderer convertPoint:presented fromView:window];
+                check("classic-canvas-touch-coordinates",
+                    fabs(returned.x - guestPoint.x) < 0.001 &&
+                    fabs(returned.y - guestPoint.y) < 0.001);
+                window.bounds = CGRectMake(0, 0, size.height, size.width);
+                LC32FitNativeLegacyRendererCanvas(window);
+            }
+            renderer.bounds = CGRectMake(0, 0, size.width, size.height - 20);
+            renderer.center = CGPointMake(17, 23);
+            [controller viewWillLayoutSubviews];
+            check("classic-canvas-controller-layout-repairs-crop",
+                CGRectEqualToRect(renderer.bounds, expectedEnabled ? canonical :
+                    CGRectMake(0, 0, size.width, size.height - 20)));
+
+            UIWindow *startupWindow = [[UIWindow alloc] initWithFrame:
+                CGRectMake(0, 0, size.height, size.width)];
+            RootlessRotationStartupCanvasController *startupController =
+                [RootlessRotationStartupCanvasController new];
+            UIView *startupRenderer = [[RootlessRotationClassicCanvasView alloc]
+                initWithFrame:CGRectMake(0, 0, size.height, size.width)];
+            startupController.view = startupRenderer;
+            startupWindow.rootViewController = startupController;
+            if(startupRenderer.superview != startupWindow) {
+                [startupWindow addSubview:startupRenderer];
+            }
+            startupRenderer.transform = CGAffineTransformIdentity;
+            startupRenderer.bounds = CGRectMake(0, 0, size.height, size.width);
+            guestCallsAllowed = YES;
+            [startupController viewWillLayoutSubviews];
+            guestCallsAllowed = NO;
+            const BOOL initializeLandscape = expectedEnabled && beforeStartup;
+            check("renderer-first-layout-uses-declared-landscape",
+                CGRectEqualToRect(startupRenderer.bounds, initializeLandscape
+                    ? canonical : CGRectMake(0, 0, size.height, size.width)));
+            check("renderer-initial-layout-native-quarter-turn",
+                initializeLandscape
+                    ? fabs(startupRenderer.transform.a) < 0.001 &&
+                        fabs(startupRenderer.transform.d) < 0.001 &&
+                        fabs(fabs(startupRenderer.transform.b) - 1) < 0.001 &&
+                        fabs(startupRenderer.transform.b + startupRenderer.transform.c) < 0.001
+                    : CGAffineTransformIsIdentity(startupRenderer.transform));
+            check("renderer-initial-layout-preserves-native-root",
+                startupWindow.rootViewController == startupController &&
+                startupRenderer.superview == startupWindow);
+        }
+        for(Class cls in @[RootlessRotationNativeModernController.class,
+                RootlessRotationRegisteredModernController.class]) {
+            UIWindow *window = [[UIWindow alloc] initWithFrame:
+                CGRectMake(0, 0, 320, 568)];
+            UIViewController *controller = [[cls alloc] init];
+            Class viewClass = cls == RootlessRotationNativeModernController.class
+                ? RootlessRotationClassicCanvasView.class : UIView.class;
+            UIView *view = [[viewClass alloc] initWithFrame:
+                CGRectMake(0, 0, 568, 320)];
+            controller.view = view;
+            window.rootViewController = controller;
+            if(view.superview != window) [window addSubview:view];
+            view.bounds = CGRectMake(0, 0, 568, 320);
+            view.transform = rotation;
+            view.center = CGPointMake(17, 23);
+            const CGRect before = view.bounds;
+            LC32FitNativeLegacyRendererCanvas(window);
+            check("classic-canvas-native-controller-and-nonrenderer-excluded",
+                CGRectEqualToRect(view.bounds, before) &&
+                CGPointEqualToPoint(view.center, CGPointMake(17, 23)));
+        }
+    } @finally {
+        guestCallsAllowed = previousGuestPermission;
+    }
+    check("classic-canvas-fit-does-not-enter-guest-callbacks",
+        legacyQueries == queries && willRotateCalls == will && didRotateCalls == did);
+}
+
 - (void)checkScopedOwnership {
     SEL configure = sel_registerName("_configureRootLayer:sceneTransformLayer:transformLayer:");
     SEL originalConfigure = sel_registerName("lc32_configureRootLayer:sceneTransformLayer:transformLayer:");
@@ -836,8 +1429,13 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     NSArray<Class> *classes = @[RootlessRotationLegacyController.class,
         RootlessRotationModernController.class, RootlessRotationRegisteredModernController.class,
         RootlessRotationUnregisteredController.class, RootlessRotationNativeModernController.class];
+    Class alertWindowClass = NSClassFromString(@"_UIAlertControllerShimPresenterWindow");
+    NSArray<Class> *windowClasses = alertWindowClass
+        ? @[UIWindow.class, alertWindowClass] : @[UIWindow.class];
+    for(Class windowClass in windowClasses)
     for(unsigned rootless = 0; rootless < 2; ++rootless) for(Class cls in classes) {
-        UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
+        if(windowClass == alertWindowClass && rootless) continue;
+        UIWindow *window = [[windowClass alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
         UIWindow *otherWindow = [[UIWindow alloc] initWithFrame:window.frame];
         UIViewController *controller = [[cls alloc] init];
         controller.view = [[UIView alloc] initWithFrame:window.bounds];
@@ -869,7 +1467,8 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
                 }
                 BOOL backingEligible = cls == RootlessRotationLegacyController.class ||
                     cls == RootlessRotationModernController.class ||
-                    cls == RootlessRotationRegisteredModernController.class;
+                    cls == RootlessRotationRegisteredModernController.class ||
+                    windowClass == alertWindowClass;
                 printf("rootless-rotation-ownership-probe: class=%s rootless=%u exception=%d "
                     "orientation=%d transform=%d unrelated=%d/%d\n",
                     class_getName(cls), rootless, ownershipThrow, ownershipObservedOrientation,
@@ -951,7 +1550,9 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
     [self dumpState:"settled"];
     check("native-compositor-policy-unchanged",
         nativeRotationPolicy() == originalNativeRotationPolicy);
-    if([testCase isEqualToString:@"manual-controller"]) {
+    if(IsCanvasTestCase()) {
+        [self checkNativeRendererCanvasBeforeStartup:NO];
+    } else if([testCase isEqualToString:@"manual-controller"]) {
         check("manual-controller-no-rotation-callbacks", legacyQueries == 0 &&
             willRotateCalls == 0 && didRotateCalls == 0);
         if(expectedEnabled) {
@@ -968,6 +1569,8 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         [self checkScopedOwnership];
         [self checkModernNativePermission];
         [self checkRotationUpdateOrdering];
+        [self checkModernDeviceNotifications];
+        [self checkNativeAlertSceneSynchronization];
     } else if([testCase isEqualToString:@"modern-refresh"]) {
         check("modern-refresh-probe-completed", self.completedRefreshProbe);
     } else if([testCase isEqualToString:@"modern-only"]) {
@@ -1081,7 +1684,7 @@ int main(int argc, char **argv) {
         for(int index = 1; index + 1 < argc; ++index) {
             if(!strcmp(argv[index], "--case")) testCase = @(argv[index + 1]);
         }
-        if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-only", @"modern-refresh", @"unregistered", @"manual", @"manual-controller",
+        if(![@[@"rootless", @"explicit", @"modern", @"modern-explicit", @"modern-only", @"modern-refresh", @"classic-canvas", @"fullscreen-canvas", @"classic-wide-policy", @"fullscreen-wide-policy", @"portrait-canvas", @"portrait-canvas-nested", @"unregistered", @"manual", @"manual-controller",
                 @"modal", @"manual-disabled", @"lifecycle", @"ownership", @"replacement"]
                 containsObject:testCase]) return 2;
         manualRotation = [testCase isEqualToString:@"manual"] ||
@@ -1090,6 +1693,7 @@ int main(int argc, char **argv) {
             [testCase isEqualToString:@"modern-explicit"] ||
             [testCase isEqualToString:@"modern-only"] ||
             [testCase isEqualToString:@"modern-refresh"] ||
+            IsCanvasTestCase() ||
             [testCase isEqualToString:@"modal"] ||
             [testCase isEqualToString:@"manual-disabled"] ||
             [testCase isEqualToString:@"ownership"];

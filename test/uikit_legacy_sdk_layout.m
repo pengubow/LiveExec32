@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <dlfcn.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -84,6 +85,9 @@ static BOOL checkBuildVersion(void) {
 @end
 @implementation SDKLayoutOptOutView
 - (BOOL)_forceLayoutEngineSolutionInRationalEdges { return NO; }
+- (BOOL)_hostsLayoutEngineAllowsTAMIC_NO {
+    return NO;
+}
 @end
 
 static void checkCompatibilityPolicy(void) {
@@ -146,19 +150,25 @@ static void checkCompatibilityPolicy(void) {
     if(!atLeast8) {
         check("ordinary-view-host-policy-unchanged",
             !send([[UIView alloc] init], selector));
+        check("subclass-host-opt-out-preserved",
+            !send([[SDKLayoutOptOutView alloc] init], selector));
         if(hasFix) {
-            // Both native roots must receive the scoped YES implementation;
-            // checking IMPs avoids constructing private keyboard views before
-            // UIApplication has initialized. The text-field alert regression
-            // separately exercises an actual UIRemoteKeyboardWindow root.
-            IMP yesPolicy = class_getMethodImplementation([UIView class],
-                sel_registerName("_forceLayoutEngineSolutionInRationalEdges"));
-            for(NSString *name in @[@"UITrackingWindowView", @"UIInputSetContainerView"]) {
+            // The tracking class may arrive only when TextInputUI loads.
+            // Verify the inherited policy after that load, without creating
+            // a private keyboard hierarchy. Keep its image resident.
+            Class trackingBefore = NSClassFromString(@"UITrackingWindowView");
+            dlopen("/System/Library/PrivateFrameworks/TextInputUI.framework/TextInputUI",
+                RTLD_LAZY | RTLD_LOCAL);
+            printf("sdk-layout-tracking-class-loaded-late: %d\n",
+                !trackingBefore && NSClassFromString(@"UITrackingWindowView") != Nil);
+            IMP hostPolicy = class_getMethodImplementation([UIView class], selector);
+            for(NSString *name in @[@"UITrackingWindowView", @"UIInputSetContainerView",
+                    @"_UIAlertControllerPhoneTVMacView"]) {
                 Class hostClass = NSClassFromString(name);
                 Method policy = hostClass ? class_getInstanceMethod(hostClass, selector) : NULL;
                 if(policy) {
                     NSString *testName = [name stringByAppendingString:@"-host-policy-opt-in"];
-                    check(testName.UTF8String, method_getImplementation(policy) == yesPolicy);
+                    check(testName.UTF8String, method_getImplementation(policy) == hostPolicy);
                 } else {
                     printf("sdk-layout-%s-host-policy: SKIP (optional class/selector absent)\n",
                         name.UTF8String);

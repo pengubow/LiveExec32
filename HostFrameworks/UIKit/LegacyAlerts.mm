@@ -1,6 +1,8 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import "LC32LegacyAlerts.h"
+#import "LC32LegacyRotation.h"
 #include <dlfcn.h>
 #include <initializer_list>
 #include <mach-o/loader.h>
@@ -22,6 +24,8 @@ struct NativeMethod {
 NativeMethod alertPolicy, publicPresent, modernPresent, viewInit, viewHosting;
 NativeMethod windowPolicy, publicDismiss, privateDismiss, finishDismiss, finishDismissWithController;
 NativeMethod alertAnimator, builtinDelegate, builtinDuration, builtinAnimator;
+thread_local __unsafe_unretained UIWindow *nativeAlertSceneWindow;
+bool nativeAlertScenePolicyInstalled;
 
 void *CodeAddress(void *address) {
 #if __has_feature(ptrauth_calls)
@@ -38,22 +42,32 @@ bool Prepare(NativeMethod &entry, Class owner, const char *name,
     entry.owner = owner;
     entry.selector = sel_registerName(name);
     entry.method = class_getInstanceMethod(owner, entry.selector);
-    if(!entry.method || method_getNumberOfArguments(entry.method) != arguments.size() + 2)
+    if(!entry.method ||
+            method_getNumberOfArguments(entry.method) != arguments.size() + 2) {
         return false;
+    }
     char type[128];
     method_getReturnType(entry.method, type, sizeof(type));
-    if(strcmp(type, result)) return false;
+    if(strcmp(type, result)) {
+        return false;
+    }
     unsigned index = 2;
     for(const char *argument : arguments) {
         method_getArgumentType(entry.method, index++, type, sizeof(type));
-        if(strcmp(type, argument)) return false;
+        if(strcmp(type, argument)) {
+            return false;
+        }
     }
     entry.original = method_getImplementation(entry.method);
     void *address = CodeAddress((void *)entry.original);
     Dl_info info = {};
-    // Require native method boundaries, not a previously installed trampoline.
-    // Return-address classification below must never broaden to arbitrary code.
-    return dladdr(address, &info) && info.dli_fbase == nativeImage && info.dli_saddr == address;
+    // Native methods in the shared image can lack exported symbols. Checking
+    // dli_saddr rejects those methods even when their IMP is genuine. The
+    // image check still rejects an implementation installed by another image.
+    if(!dladdr(address, &info) || info.dli_fbase != nativeImage) {
+        return false;
+    }
+    return true;
 }
 
 void Replace(const NativeMethod &entry, IMP replacement) {
@@ -63,7 +77,8 @@ void Replace(const NativeMethod &entry, IMP replacement) {
 
 // UIKit's policy helper tail-calls this UIWindow class method. Select a modern
 // branch only in the exact original native method currently handling an alert.
-// Other policy reads, including window rotation/layout, retain the real SDK.
+// A native shim presenter additionally keeps its own scene policy throughout
+// a matched window operation. Guest window operations retain the real SDK.
 thread_local void *policyCaller;
 struct PolicyScope {
     void *previous = policyCaller;
@@ -76,6 +91,7 @@ struct PolicyScope {
 };
 
 __attribute__((noinline)) BOOL TransformPolicy(id self, SEL selector) {
+    if(nativeAlertSceneWindow) return YES;
     if(policyCaller) {
         void *returnPC = CodeAddress(__builtin_extract_return_addr(__builtin_return_address(0)));
         Dl_info info = {};
@@ -94,26 +110,57 @@ BOOL DismissesAlert(UIViewController *controller) {
     return IsAlert(child ?: controller);
 }
 
-BOOL BuiltinAnimatesAlert(id animator) {
+UIPresentationController *BuiltinAlertPresentation(id animator) {
     id delegate = ((id (*)(id, SEL))objc_msgSend)(animator, builtinDelegate.selector);
-    return [delegate isKindOfClass:UIPresentationController.class] &&
-        IsAlert([(UIPresentationController *)delegate presentedViewController]);
+    if([delegate isKindOfClass:UIPresentationController.class] &&
+       IsAlert([(UIPresentationController *)delegate presentedViewController])) {
+        return delegate;
+    }
+    return nil;
+}
+
+UIWindow *AlertPresentationWindow(UIViewController *controller) {
+    UIWindow *window = controller.viewIfLoaded.window;
+    if(LC32NativeAlertWindowUsesScenePolicy(window)) return window;
+    UIPresentationController *presentation = controller.presentationController;
+    window = presentation.containerView.window;
+    if(LC32NativeAlertWindowUsesScenePolicy(window)) return window;
+    window = presentation.presentingViewController.viewIfLoaded.window;
+    return LC32NativeAlertWindowUsesScenePolicy(window) ? window : nil;
 }
 
 BOOL UseAlertPresentationController(id, SEL) { return YES; }
 
+using AlertCompletion = void (^)(void);
+
+AlertCompletion ApplicationCompletion(AlertCompletion completion) {
+    if(!completion) return nil;
+    return ^{
+        LC32NativeAlertSceneScope userPolicy(nil);
+        PolicyScope userCaller(NO, publicPresent);
+        completion();
+    };
+}
+
 void Present(id self, SEL selector, UIViewController *presented, BOOL animated,
              void (^completion)(void)) {
     // Suppress an enclosing alert scope if user completion code starts a new
-    // presentation synchronously. This method needs no policy override itself.
+    // presentation synchronously. Its native presenter has its own scene;
+    // preserve that policy through the complete presentation operation.
     PolicyScope scope(NO, publicPresent);
+    LC32NativeAlertSceneScope scenePolicy(
+        IsAlert(presented) ? AlertPresentationWindow(self) : nil);
     if(!IsAlert(presented)) {
         ((void (*)(id, SEL, UIViewController *, BOOL, void (^)(void)))publicPresent.original)(
             self, selector, presented, animated, completion);
         return;
     }
-    void (^modernCompletion)(BOOL) = nil;
-    if(completion) modernCompletion = ^(BOOL) { completion(); };
+    AlertCompletion appCompletion = ApplicationCompletion(completion);
+    void (^modernCompletion)(BOOL) = ^(BOOL) {
+        UIWindow *alertWindow = AlertPresentationWindow(presented);
+        LC32ScheduleNativeLegacyAlertPlacement(alertWindow);
+        if(appCompletion) appCompletion();
+    };
     ((void (*)(id, SEL, UIViewController *, BOOL, void (^)(BOOL)))objc_msgSend)(
         self, modernPresent.selector, presented, animated, modernCompletion);
 }
@@ -136,26 +183,34 @@ id InitializeAlertView(id self __attribute__((ns_consumed)), SEL selector, CGRec
 }
 
 void Dismiss(UIViewController *self, SEL selector, int transition, void (^completion)(void)) {
-    PolicyScope scope(DismissesAlert(self), publicDismiss);
+    const BOOL alert = DismissesAlert(self);
+    LC32NativeAlertSceneScope scenePolicy(alert ? AlertPresentationWindow(self) : nil);
+    PolicyScope scope(alert, publicDismiss);
     ((void (*)(id, SEL, int, void (^)(void)))publicDismiss.original)(
-        self, selector, transition, completion);
+        self, selector, transition, ApplicationCompletion(completion));
 }
 
 void DismissFrom(UIViewController *self, SEL selector, int transition,
                  UIViewController *from, void (^completion)(void)) {
-    PolicyScope scope(from ? IsAlert(from) : DismissesAlert(self), privateDismiss);
+    const BOOL alert = from ? IsAlert(from) : DismissesAlert(self);
+    LC32NativeAlertSceneScope scenePolicy(alert ? AlertPresentationWindow(self) : nil);
+    PolicyScope scope(alert, privateDismiss);
     ((void (*)(id, SEL, int, UIViewController *, void (^)(void)))privateDismiss.original)(
-        self, selector, transition, from, completion);
+        self, selector, transition, from, ApplicationCompletion(completion));
 }
 
 void FinishDismiss(UIViewController *self, SEL selector) {
-    PolicyScope scope(DismissesAlert(self), finishDismiss);
+    const BOOL alert = DismissesAlert(self);
+    LC32NativeAlertSceneScope scenePolicy(alert ? AlertPresentationWindow(self) : nil);
+    PolicyScope scope(alert, finishDismiss);
     ((void (*)(id, SEL))finishDismiss.original)(self, selector);
 }
 
 void FinishDismissWithController(UIViewController *self, SEL selector, UIViewController *dismissed) {
     // Newer UIKit passes the dismissed child explicitly; the old no-argument
     // selector is only a notification there. Older releases use the latter.
+    LC32NativeAlertSceneScope scenePolicy(
+        IsAlert(dismissed) ? AlertPresentationWindow(self) : nil);
     PolicyScope scope(IsAlert(dismissed), finishDismissWithController);
     ((void (*)(id, SEL, UIViewController *))finishDismissWithController.original)(self, selector, dismissed);
 }
@@ -164,6 +219,7 @@ void AnimateAlert(id self, SEL selector, id<UIViewControllerContextTransitioning
                    void (^completion)(BOOL)) {
     BOOL alert = IsAlert([context viewControllerForKey:UITransitionContextFromViewControllerKey]) ||
         IsAlert([context viewControllerForKey:UITransitionContextToViewControllerKey]);
+    LC32NativeAlertSceneScope scenePolicy(alert ? context.containerView.window : nil);
     PolicyScope scope(alert, alertAnimator);
     // The modern context deliberately returns no underlying presenter view.
     // The legacy animator instead grabs toViewController.view during dismissal,
@@ -172,12 +228,16 @@ void AnimateAlert(id self, SEL selector, id<UIViewControllerContextTransitioning
 }
 
 CGFloat BuiltinDuration(id self, SEL selector, int transition) {
-    PolicyScope scope(BuiltinAnimatesAlert(self), builtinDuration);
+    UIPresentationController *presentation = BuiltinAlertPresentation(self);
+    LC32NativeAlertSceneScope scenePolicy(presentation.containerView.window);
+    PolicyScope scope(presentation != nil, builtinDuration);
     return ((CGFloat (*)(id, SEL, int))builtinDuration.original)(self, selector, transition);
 }
 
 void AnimateBuiltin(id self, SEL selector, id context) {
-    PolicyScope scope(BuiltinAnimatesAlert(self), builtinAnimator);
+    UIPresentationController *presentation = BuiltinAlertPresentation(self);
+    LC32NativeAlertSceneScope scenePolicy(presentation.containerView.window);
+    PolicyScope scope(presentation != nil, builtinAnimator);
     // Native nonanimated alerts use this animator too. Both its duration and
     // animation phases must use the modern context, not legacy view/delegate
     // callbacks that a UIAlertController presentation controller cannot serve.
@@ -212,11 +272,38 @@ bool PrepareHooks(void) {
 }
 } // namespace
 
+extern "C" bool LC32IsNativeAlertPresenterWindow(UIWindow *window) {
+    for(Class cls = object_getClass(window); cls;
+            cls = class_getSuperclass(cls)) {
+        if(strcmp(class_getName(cls), "_UIAlertControllerShimPresenterWindow") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+extern "C" bool LC32NativeAlertWindowUsesScenePolicy(UIWindow *window) {
+    return nativeAlertScenePolicyInstalled && window.windowScene &&
+        LC32IsNativeAlertPresenterWindow(window) &&
+        !dyld_program_sdk_at_least({PLATFORM_IOS, 0x00080000});
+}
+
+LC32NativeAlertSceneScope::LC32NativeAlertSceneScope(UIWindow *window)
+    : previous_(nativeAlertSceneWindow) {
+    nativeAlertSceneWindow = LC32NativeAlertWindowUsesScenePolicy(window) ? window : nil;
+}
+
+LC32NativeAlertSceneScope::~LC32NativeAlertSceneScope() {
+    nativeAlertSceneWindow = previous_;
+}
+
 @interface LC32LegacyAlerts : NSObject
 @end
 @implementation LC32LegacyAlerts
 + (void)load {
-    if(dyld_program_sdk_at_least({PLATFORM_IOS, 0x00080000})) return;
+    if(dyld_program_sdk_at_least({PLATFORM_IOS, 0x00080000})) {
+        return;
+    }
     // Presentation, layout and dismissal are a matched native flow. Install
     // nothing if this UIKit version (or an earlier hook) lacks a prerequisite.
     if(!PrepareHooks()) return;
@@ -232,5 +319,6 @@ bool PrepareHooks(void) {
     Replace(alertAnimator, (IMP)AnimateAlert);
     Replace(builtinDuration, (IMP)BuiltinDuration);
     Replace(builtinAnimator, (IMP)AnimateBuiltin);
+    nativeAlertScenePolicyInstalled = true;
 }
 @end

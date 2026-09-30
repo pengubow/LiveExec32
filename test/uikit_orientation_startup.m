@@ -43,6 +43,10 @@ static const char * const callbackNames[CallbackCount] = {
 static uint32_t engineReady;
 static uint32_t callbacks[CallbackCount];
 static uint32_t prematureCallbacks;
+static unsigned legacyQueryDepth;
+static unsigned maximumLegacyQueryDepth;
+static unsigned legacyStatusBarRequests;
+static UIInterfaceOrientation firstLegacyQueries[4];
 static int failures;
 
 static void recordCallback(unsigned callback) {
@@ -128,8 +132,26 @@ static UIInterfaceOrientation nativeControllerOrientation(
 }
 - (BOOL)shouldAutorotateToInterfaceOrientation:
         (UIInterfaceOrientation)orientation {
-    recordCallback(LegacyAutorotate);
-    return orientation == UIInterfaceOrientationLandscapeRight;
+    ++legacyQueryDepth;
+    maximumLegacyQueryDepth = MAX(maximumLegacyQueryDepth, legacyQueryDepth);
+    @try {
+        recordCallback(LegacyAutorotate);
+        const unsigned queryIndex = callbackCount(LegacyAutorotate) - 1;
+        if(queryIndex < sizeof(firstLegacyQueries) / sizeof(*firstLegacyQueries)) {
+            firstLegacyQueries[queryIndex] = orientation;
+        }
+        /* Old renderers can request a status-bar turn from a rotation check,
+         * including a direction they reject for the native controller.
+         * This must neither reenter this policy nor keep requeuing probes. */
+        if(UIInterfaceOrientationIsLandscape(orientation)) {
+            ++legacyStatusBarRequests;
+            [[UIApplication sharedApplication]
+                setStatusBarOrientation:orientation animated:NO];
+        }
+        return orientation == UIInterfaceOrientationLandscapeRight;
+    } @finally {
+        --legacyQueryDepth;
+    }
 }
 @end
 
@@ -140,6 +162,8 @@ static UIInterfaceOrientation nativeControllerOrientation(
     NSUInteger _waitCount;
     BOOL _nestedInitializationTickRan;
     BOOL _activatedLegacyWindow;
+    unsigned _lastLegacyQueryCount;
+    unsigned _stableLegacyPolicyTicks;
 }
 @property(nonatomic, retain) UIWindow *window;
 @end
@@ -227,12 +251,20 @@ static UIInterfaceOrientation nativeControllerOrientation(
         callbackCount(LegacyAutorotate) > 0;
     const BOOL narrowed = modern == UIInterfaceOrientationMaskLandscapeRight &&
         legacy == UIInterfaceOrientationMaskLandscapeRight;
-    if(queried && narrowed) {
+    const unsigned legacyQueryCount = callbackCount(LegacyAutorotate);
+    if(queried && narrowed && legacyQueryCount == _lastLegacyQueryCount) {
+        ++_stableLegacyPolicyTicks;
+    } else {
+        _stableLegacyPolicyTicks = 0;
+    }
+    _lastLegacyQueryCount = legacyQueryCount;
+    if(_stableLegacyPolicyTicks >= 5) {
         [timer invalidate];
         report("modern-callback-resumes-after-setup", YES);
         report("legacy-callback-resumes-after-setup", YES);
         report("modern-native-cache-narrows-to-guest-policy", YES);
         report("legacy-native-cache-narrows-to-guest-policy", YES);
+        report("status-bar-layout-does-not-requeue-policy", YES);
         [self finish];
     } else if(++_waitCount >= 200) {
         [timer invalidate];
@@ -244,6 +276,7 @@ static UIInterfaceOrientation nativeControllerOrientation(
             modern == UIInterfaceOrientationMaskLandscapeRight);
         report("legacy-native-cache-narrows-to-guest-policy",
             legacy == UIInterfaceOrientationMaskLandscapeRight);
+        report("status-bar-layout-does-not-requeue-policy", NO);
         [self finish];
     }
 }
@@ -290,6 +323,13 @@ static UIInterfaceOrientation nativeControllerOrientation(
     [detached release];
     report("no-premature-callbacks", __atomic_load_n(
         &prematureCallbacks, __ATOMIC_RELAXED) == 0);
+    report("legacy-status-bar-side-effects-exercised", legacyStatusBarRequests > 0);
+    report("legacy-native-policy-does-not-reenter-guest", maximumLegacyQueryDepth == 1);
+    report("legacy-query-order-matches-ios10",
+        firstLegacyQueries[0] == UIInterfaceOrientationPortrait &&
+        firstLegacyQueries[1] == UIInterfaceOrientationPortraitUpsideDown &&
+        firstLegacyQueries[2] == (UIInterfaceOrientation)4 &&
+        firstLegacyQueries[3] == (UIInterfaceOrientation)3);
     for(unsigned index = 0; index < CallbackCount; ++index)
         printf("orientation-startup-callback %s: %u\n",
             callbackNames[index], (unsigned)callbackCount(index));

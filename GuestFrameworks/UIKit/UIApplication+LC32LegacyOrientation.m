@@ -11,9 +11,12 @@ static uint64_t LC32HostLegacyOrientation;
 static uint64_t LC32HostLegacyStatusBarOrientation;
 
 static void LC32ResolveLegacyOrientation(void) {
-    if(!LC32GuestUIKitLegacyCompatibilityEnabled()) return;
+    /* A spoofed old SDK still needs to publish explicit status-bar turns.
+     * The host selects the matching presentation path; the getter override
+     * remains limited to the modern fixed-canvas adapter. */
     LC32HostLegacyOrientation = LC32Dlsym(
         "LC32UIKitHandleLegacyStatusBarOrientation", YES);
+    if(!LC32GuestUIKitLegacyCompatibilityEnabled()) return;
     LC32HostLegacyStatusBarOrientation = LC32Dlsym(
         "LC32UIKitGetLegacyStatusBarOrientation", YES);
 }

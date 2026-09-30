@@ -78,6 +78,19 @@ LiveContainer disables these adapters, while existing SDK-11-clamped
 executables or LiveContainer overrides retain them. The native test also
 includes policy-only cases with an SDK-11 executable and test-provided
 effective SDKs; those isolate this selection without spoofing UIKit itself.
+Both geometry paths honor the guest's fullscreen plist policy unless a guest
+controller supplies its own status-bar preference. For a saved LiveContainer
+Classic Mode request, landscape OpenGL roots on phones retain their actual
+launch canvas through scene-size changes. The modern path uses the native
+container; the old-SDK path centers the renderer in the portrait backing
+window and preserves UIKit's quarter-turn. Fullscreen old-SDK roots also
+repair the legacy drawing-area inset during startup and layout. Without
+Classic Mode, those renderers follow the current full viewport. Fullscreen
+EAGL roots with modern orientation policy and no custom rotation lifecycle
+receive their declared landscape bounds during initial attachment, before an
+engine can create its scene using a provisional portrait size. The native regression's
+`classic-canvas` case is available through
+`sh test/uikit_legacy_rootless_rotation.sh --device UDID --sdk 6.1 --case classic-canvas`.
 To compare native UIKit geometry on
 newer hosts, launch with `LC32_DISABLE_UIKIT_COMPATIBILITY=1` in the host
 process environment. This disables the host and guest canvas, orientation,
