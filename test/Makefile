@@ -241,7 +241,9 @@ ROOTFS ?= $(abspath ../Resources/RootFS)
 
 include ../module-cache.mk
 
+ifeq ($(shell uname -s),Darwin)
 ADDITIONAL_CFLAGS := -Wno-deprecated-module-dot-map
+endif
 ADDITIONAL_LDFLAGS := -fno-autolink $(LC32_GUEST_LINKER_FLAGS)
 
 include $(THEOS)/makefiles/common.mk
@@ -346,7 +348,7 @@ $(eval $(call lc32_guest_test,lc32-corefoundation-run-loop-timer,corefoundation_
 $(eval $(call lc32_guest_test,lc32-corefoundation-socket,corefoundation_socket.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-stream-host,corefoundation_stream_host.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-string-character-set,corefoundation_string_character_set.m,Foundation CoreFoundation))
-$(eval $(call lc32_guest_test,lc32-corefoundation-string-transform,corefoundation_string_transform.m,Foundation CoreFoundation))
+$(eval $(call lc32_guest_test,lc32-corefoundation-string-transform,corefoundation_string_transform.m,Foundation CoreFoundation UIKit))
 $(eval $(call lc32_guest_test,lc32-corefoundation-time-zone,corefoundation_time_zone.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-url-propertylist,corefoundation_url_propertylist.m,Foundation CoreFoundation))
 $(eval $(call lc32_guest_test,lc32-corefoundation-url-common,corefoundation_url_common.m,Foundation CoreFoundation))
