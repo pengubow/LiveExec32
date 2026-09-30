@@ -10,6 +10,7 @@
 #include <time.h>
 
 #import "LC32AudioToolboxBridge.h"
+#include "LC32SpatialMixerPCM.h"
 
 #ifndef LC32_TRACE_AUDIO_OUTPUT
 #define LC32_TRACE_AUDIO_OUTPUT 0
@@ -357,6 +358,8 @@ typedef struct {
     LC32SilentAudioUnit *sourceMixer;
     AURenderCallbackStruct mixerCallbackSnapshot[
         LC32SilentAudioMaximumMixerBuses];
+    AudioStreamBasicDescription mixerInputFormatSnapshot[
+        LC32SilentAudioMaximumMixerBuses];
     AudioUnitParameterValue mixerLinearGainSnapshot[
         LC32SilentAudioMaximumMixerBuses];
     AudioUnitParameterValue mixerEnableSnapshot[
@@ -457,6 +460,23 @@ static LC32SilentAudioUnit *LC32SilentAudioMixerForConnection(
         ? source : NULL;
 }
 
+static AudioStreamBasicDescription *LC32SilentAudioPropertyFormat(
+        LC32SilentAudioUnit *unit, AudioUnitScope scope, AudioUnitElement element) {
+    if(unit->kind == LC32SilentAudioUnitKindRemoteIO && element == 0 &&
+       (scope == kAudioUnitScope_Input || scope == kAudioUnitScope_Output)) {
+        return &unit->format;
+    }
+    if(unit->kind == LC32SilentAudioUnitKindSpatialMixer) {
+        if(scope == kAudioUnitScope_Input && element < unit->mixerInputBusCount) {
+            return &unit->mixerInputFormats[element];
+        }
+        if(scope == kAudioUnitScope_Output && element == 0) {
+            return &unit->format;
+        }
+    }
+    return NULL;
+}
+
 static BOOL LC32SilentAudioFormatIsValid(
         const AudioStreamBasicDescription *format) {
     if(!format || format->mFormatID != kAudioFormatLinearPCM ||
@@ -468,6 +488,32 @@ static BOOL LC32SilentAudioFormatIsValid(
         return NO;
     }
     return YES;
+}
+
+static BOOL LC32SilentAudioMixerFormatIsValid(
+        const AudioStreamBasicDescription *format, BOOL input) {
+    if(!LC32SilentAudioFormatIsValid(format) ||
+       format->mFramesPerPacket != 1 ||
+       format->mBytesPerPacket != format->mBytesPerFrame ||
+       format->mReserved != 0) {
+        return NO;
+    }
+    const AudioFormatFlags layout = input ?
+        (format->mFormatFlags & kAudioFormatFlagIsNonInterleaved) :
+        kAudioFormatFlagIsNonInterleaved;
+    const AudioFormatFlags floatFlags = kAudioFormatFlagIsFloat |
+        kAudioFormatFlagIsPacked | layout;
+    if(format->mFormatFlags == floatFlags &&
+       format->mBitsPerChannel == 32 &&
+       format->mBytesPerFrame == sizeof(Float32) &&
+       format->mChannelsPerFrame == (input ? 1u : 2u)) {
+        return YES;
+    }
+    return input && format->mChannelsPerFrame == 1 &&
+        format->mFormatFlags == (kAudioFormatFlagIsSignedInteger |
+            kAudioFormatFlagIsPacked | layout) &&
+        format->mBitsPerChannel == 16 &&
+        format->mBytesPerFrame == sizeof(SInt16);
 }
 
 static UInt32 LC32SilentAudioRenderFrames(
@@ -561,11 +607,10 @@ static void LC32SilentAudioInvokeRenderNotifies(
     }
 }
 
-/* Pull each active input bus of the lightweight spatial mixer. The legacy
- * mixer format is planar Float32: one mono buffer per input bus and two mono
- * buffers at its output. This is deliberately a basic gain-only mix; the
- * important compatibility behavior is that every guest render callback is
- * driven with the native bus number and buffer layout. */
+/* Pull each active input bus using its declared PCM format. Inputs are mono
+ * Float32 or signed 16-bit PCM; the output is planar stereo Float32. This is
+ * a basic gain-only mix. Each guest callback receives its bus number and
+ * format's buffer size, then its samples are converted before accumulation. */
 static OSStatus LC32SilentAudioRenderMixer(
         LC32SilentAudioPump *pump,
         AudioUnitRenderActionFlags *actionFlags,
@@ -586,6 +631,8 @@ static OSStatus LC32SilentAudioRenderMixer(
     for(UInt32 bus = 0; bus < pump->mixerInputBusCount; ++bus) {
         pump->mixerCallbackSnapshot[bus] =
             mixer->mixerRenderCallbacks[bus];
+        pump->mixerInputFormatSnapshot[bus] =
+            mixer->mixerInputFormats[bus];
         pump->mixerLinearGainSnapshot[bus] =
             mixer->mixerLinearGains[bus];
         pump->mixerEnableSnapshot[bus] =
@@ -613,11 +660,24 @@ static OSStatus LC32SilentAudioRenderMixer(
         if(!callback.inputProc || pump->mixerEnableSnapshot[bus] == 0.0f)
             continue;
 
+        const AudioStreamBasicDescription *format =
+            &pump->mixerInputFormatSnapshot[bus];
+        if(!LC32SilentAudioMixerFormatIsValid(format, YES) ||
+           format->mSampleRate != pump->format.mSampleRate) {
+            if(result == noErr) result = kAudioUnitErr_FormatNotSupported;
+            continue;
+        }
+        const UInt32 inputBytes =
+            pump->numberFrames * format->mBytesPerFrame;
+        if(inputBytes > pump->mixerInputDataBytes) {
+            if(result == noErr) result = kAudio_ParamError;
+            continue;
+        }
         memset(pump->mixerInputData, 0, pump->mixerInputDataBytes);
         pump->mixerInputBufferList.mNumberBuffers = 1;
         pump->mixerInputBufferList.mBuffers[0] = (AudioBuffer){
             .mNumberChannels = 1,
-            .mDataByteSize = (UInt32)pump->mixerInputDataBytes,
+            .mDataByteSize = inputBytes,
             .mData = pump->mixerInputData,
         };
         AudioUnitRenderActionFlags busFlags = 0;
@@ -639,17 +699,16 @@ static OSStatus LC32SilentAudioRenderMixer(
 
         const UInt32 availableFrames =
             pump->mixerInputBufferList.mBuffers[0].mDataByteSize /
-                sizeof(Float32);
+                format->mBytesPerFrame;
         const UInt32 frames = availableFrames < pump->numberFrames
             ? availableFrames : pump->numberFrames;
-        const Float32 *input =
+        const void *input =
             pump->mixerInputBufferList.mBuffers[0].mData;
         const Float32 gain = pump->mixerLinearGainSnapshot[bus];
-        for(UInt32 frame = 0; frame < frames; ++frame) {
-            const Float32 sample = input[frame] * gain;
-            left[frame] += sample;
-            right[frame] += sample;
-        }
+        const LC32SpatialMixerPCMKind kind =
+            format->mFormatFlags & kAudioFormatFlagIsFloat
+                ? LC32SpatialMixerPCMFloat32 : LC32SpatialMixerPCMSigned16;
+        LC32SpatialMixerAccumulatePCM(input, kind, frames, gain, left, right);
         producedAudio = producedAudio || frames != 0;
     }
 
@@ -832,6 +891,12 @@ static void *LC32SilentAudioPumpMain(void *context) {
             if(submitStatus == noErr) {
                 /* Waiting for a returned native AudioQueue buffer supplies
                  * the pacing for the next render quantum. */
+                hostPaced = YES;
+            } else if(submitStatus == kAudioUnitErr_RenderTimeout) {
+                /* A route transition or busy startup can delay the native
+                 * callback beyond one quantum. The queue remains valid; a
+                 * later callback frees a buffer, so keep submitting. The
+                 * timed wait already paced this iteration. */
                 hostPaced = YES;
             } else {
                 __atomic_store_n(&pump->unit->hostOutputHealthy, 0,
@@ -1044,6 +1109,28 @@ static OSStatus LC32AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID i
     if(!silent || (inDataSize && !inData)) return kAudio_ParamError;
     pthread_mutex_lock(&silent->mutex);
 
+    if(inID == kAudioUnitProperty_SampleRate && inDataSize == sizeof(Float64)) {
+        AudioStreamBasicDescription *format =
+            LC32SilentAudioPropertyFormat(silent, inScope, inElement);
+        if(!format) {
+            pthread_mutex_unlock(&silent->mutex);
+            return kAudioUnitErr_InvalidElement;
+        }
+        if(silent->initialized || silent->renderThreadJoinable) {
+            pthread_mutex_unlock(&silent->mutex);
+            return kAudioUnitErr_Initialized;
+        }
+        Float64 sampleRate;
+        memcpy(&sampleRate, inData, sizeof(sampleRate));
+        if(!(sampleRate >= 1.0 && sampleRate <= 384000.0)) {
+            pthread_mutex_unlock(&silent->mutex);
+            return kAudioUnitErr_FormatNotSupported;
+        }
+        format->mSampleRate = sampleRate;
+        pthread_mutex_unlock(&silent->mutex);
+        return noErr;
+    }
+
     if(silent->kind == LC32SilentAudioUnitKindRemoteIO) {
         if(inID == kAudioUnitProperty_StreamFormat &&
            inScope == kAudioUnitScope_Input && inElement == 0 &&
@@ -1121,6 +1208,27 @@ static OSStatus LC32AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID i
         }
     } else if(silent->kind ==
             LC32SilentAudioUnitKindSpatialMixer) {
+        if(inID == kAudioUnitProperty_StreamFormat &&
+           inDataSize == sizeof(AudioStreamBasicDescription)) {
+            const BOOL input = inScope == kAudioUnitScope_Input;
+            AudioStreamBasicDescription *destination =
+                LC32SilentAudioPropertyFormat(silent, inScope, inElement);
+            if(!destination) {
+                pthread_mutex_unlock(&silent->mutex);
+                return kAudioUnitErr_InvalidElement;
+            }
+            if(silent->initialized) {
+                pthread_mutex_unlock(&silent->mutex);
+                return kAudioUnitErr_Initialized;
+            }
+            if(!LC32SilentAudioMixerFormatIsValid(inData, input)) {
+                pthread_mutex_unlock(&silent->mutex);
+                return kAudioUnitErr_FormatNotSupported;
+            }
+            memcpy(destination, inData, sizeof(*destination));
+            pthread_mutex_unlock(&silent->mutex);
+            return noErr;
+        }
         if(inID == kAudioUnitProperty_ElementCount &&
            inScope == kAudioUnitScope_Input && inElement == 0 &&
            inDataSize == sizeof(UInt32)) {
@@ -1242,6 +1350,22 @@ OSStatus AudioUnitGetProperty(AudioUnit inUnit, AudioUnitPropertyID inID,
     if(!silent || !ioDataSize || (*ioDataSize && !outData))
         return kAudio_ParamError;
     pthread_mutex_lock(&silent->mutex);
+    if(inID == kAudioUnitProperty_SampleRate) {
+        const AudioStreamBasicDescription *format =
+            LC32SilentAudioPropertyFormat(silent, inScope, inElement);
+        if(format) {
+            const UInt32 required = sizeof(format->mSampleRate);
+            if(*ioDataSize < required) {
+                *ioDataSize = required;
+                pthread_mutex_unlock(&silent->mutex);
+                return kAudio_ParamError;
+            }
+            memcpy(outData, &format->mSampleRate, required);
+            *ioDataSize = required;
+            pthread_mutex_unlock(&silent->mutex);
+            return noErr;
+        }
+    }
     if(inID == kAudioUnitProperty_MaximumFramesPerSlice &&
        inScope == kAudioUnitScope_Global && inElement == 0) {
         const UInt32 required = sizeof(UInt32);
@@ -1305,13 +1429,8 @@ OSStatus AudioUnitGetProperty(AudioUnit inUnit, AudioUnitPropertyID inID,
 
     if(silent->kind == LC32SilentAudioUnitKindSpatialMixer &&
        inID == kAudioUnitProperty_StreamFormat) {
-        const AudioStreamBasicDescription *format = NULL;
-        if(inScope == kAudioUnitScope_Input &&
-                inElement < silent->mixerInputBusCount) {
-            format = &silent->mixerInputFormats[inElement];
-        } else if(inScope == kAudioUnitScope_Output && inElement == 0) {
-            format = &silent->format;
-        }
+        const AudioStreamBasicDescription *format =
+            LC32SilentAudioPropertyFormat(silent, inScope, inElement);
         if(format) {
             const UInt32 required = sizeof(*format);
             if(*ioDataSize < required) {

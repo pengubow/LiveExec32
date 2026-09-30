@@ -24,7 +24,7 @@ static OSStatus mixer_input_callback(
         const AudioTimeStamp *timeStamp, UInt32 bus, UInt32 frameCount,
         AudioBufferList *buffers) {
     MixerState *state = refCon;
-    const UInt32 requiredBytes = frameCount * sizeof(Float32);
+    const UInt32 requiredBytes = frameCount * sizeof(SInt16);
     if(!state || !actionFlags || !timeStamp || bus != state->bus ||
        !frameCount || frameCount > 4096 || !buffers ||
        buffers->mNumberBuffers != 1 ||
@@ -35,9 +35,9 @@ static OSStatus mixer_input_callback(
             &state->callbackValid, 0, memory_order_release);
         return kAudio_ParamError;
     }
-    Float32 *samples = buffers->mBuffers[0].mData;
+    SInt16 *samples = buffers->mBuffers[0].mData;
     for(UInt32 frame = 0; frame < frameCount; ++frame)
-        samples[frame] = 0.5f;
+        samples[frame] = 16384;
     const uint32_t callbackCount = atomic_load_explicit(
         &state->callbackCount, memory_order_relaxed);
     atomic_store_explicit(
@@ -165,6 +165,33 @@ int main(void) {
         AudioUnitGetProperty(mixer, kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Output, 0, &outputFormat, &size) == noErr &&
         size == sizeof(outputFormat) && format_is(&outputFormat, 2));
+
+    inputFormat.mSampleRate = 48000.0;
+    inputFormat.mFormatFlags = kAudioFormatFlagIsSignedInteger |
+        kAudioFormatFlagIsPacked;
+    inputFormat.mBytesPerFrame = sizeof(SInt16);
+    inputFormat.mBytesPerPacket = sizeof(SInt16);
+    inputFormat.mBitsPerChannel = 16;
+    outputFormat.mSampleRate = inputFormat.mSampleRate;
+    passed &= report("audio-unit-mixer-set-signed16-input-and-output-rate",
+        AudioUnitSetProperty(mixer, kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Input, 7, &inputFormat,
+            sizeof(inputFormat)) == noErr &&
+        AudioUnitSetProperty(mixer, kAudioUnitProperty_SampleRate,
+            kAudioUnitScope_Output, 0, &outputFormat.mSampleRate,
+            sizeof(outputFormat.mSampleRate)) == noErr);
+    Float64 storedSampleRate = 0;
+    size = sizeof(storedSampleRate);
+    passed &= report("audio-unit-mixer-output-rate-round-trip",
+        AudioUnitGetProperty(mixer, kAudioUnitProperty_SampleRate,
+            kAudioUnitScope_Output, 0, &storedSampleRate, &size) == noErr &&
+        storedSampleRate == outputFormat.mSampleRate);
+    AudioStreamBasicDescription storedInput = {0};
+    size = sizeof(storedInput);
+    passed &= report("audio-unit-mixer-signed16-format-round-trip",
+        AudioUnitGetProperty(mixer, kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Input, 7, &storedInput, &size) == noErr &&
+        memcmp(&storedInput, &inputFormat, sizeof(storedInput)) == 0);
 
     AudioUnitConnection connection = {
         .sourceAudioUnit = mixer,
