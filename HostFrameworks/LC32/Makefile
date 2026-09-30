@@ -30,6 +30,23 @@ DYNARMIC_STATIC_LIBS := \
 	$(DYNARMIC_BUILD_DIR)/externals/mcl/src/libmcl.a \
 	$(DYNARMIC_BUILD_DIR)/externals/fmt/libfmt.a
 
+ifeq ($(shell uname -s),Linux)
+DYNARMIC_CMAKE_TOOLCHAIN_FLAGS := \
+	-DCMAKE_C_COMPILER="$(TARGET_CC)" \
+	-DCMAKE_CXX_COMPILER="$(TARGET_CXX)" \
+	-DCMAKE_C_COMPILER_TARGET=arm64-apple-ios15.0 \
+	-DCMAKE_CXX_COMPILER_TARGET=arm64-apple-ios15.0 \
+	-DCMAKE_CXX_FLAGS="-idirafter /usr/include" \
+	-DCMAKE_AR="$(dir $(TARGET_CC))ar" \
+	-DCMAKE_RANLIB="$(dir $(TARGET_CC))ranlib"
+GDBSTUB_CC := $(TARGET_CC) -target arm64-apple-ios15.0
+GDBSTUB_AR := $(dir $(TARGET_CC))ar
+else
+DYNARMIC_CMAKE_TOOLCHAIN_FLAGS :=
+GDBSTUB_CC := $(TARGET_CC)
+GDBSTUB_AR := ar
+endif
+
 # CMake 4 split developer diagnostics into author and policy categories and
 # made its older aggregate spellings noisy. Keep both the local CMake 3 flow
 # and the macOS CI CMake 4 flow quiet without hiding Dynarmic's own messages.
@@ -74,7 +91,8 @@ LiveExec32Shared_FILES = \
 	../Accelerate/Accelerate.mm \
 	../OpenAL/OpenAL.mm ../OpenGLES/OpenGLES.mm ../UIKit/UIKit.mm \
 	../UIKit/LegacyAutoLayout.mm ../UIKit/LegacyFonts.mm ../UIKit/LegacyAlerts.mm \
-	../UIKit/LegacyRotation.mm ../UIKit/LegacyNibLoading.mm
+	../UIKit/LegacyRotation.mm ../UIKit/LegacyScenes.mm \
+	../UIKit/LegacyNibLoading.mm
 LiveExec32Shared_CFLAGS = \
 	-I. -I$(DYNARMIC_ROOT)/src -I../../include -DDYNARMIC_MASTER \
 	-I../../External/mini-gdbstub/include -DLC32_DEBUG_LOGS=$(LC32_DEBUG_LOGS)
@@ -83,6 +101,7 @@ crash_exception.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyFonts.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyAlerts.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyRotation.mm_CFLAGS = -fobjc-arc
+../UIKit/LegacyScenes.mm_CFLAGS = -fobjc-arc
 LiveExec32Shared_OBJ_FILES = $(DYNARMIC_STATIC_LIBS)
 LiveExec32Shared_LDFLAGS = -L../../External/mini-gdbstub/build -Wl,-weak-lMobileGestalt
 LiveExec32Shared_LIBRARIES = gdbstub
@@ -97,7 +116,9 @@ LiveExec32Shared_INSTALL = 0
 # mini-gdbstub is a static dependency of this framework rather than of the
 # launcher, which also keeps direct framework builds complete.
 before-LiveExec32Shared-all:: lc32-build-info lc32-dynarmic-static
-	$(MAKE) -C ../../External/mini-gdbstub ARCH=rv32 CC="cc -isysroot $(ISYSROOT) -miphoneos-version-min=15.0"
+	$(MAKE) -C ../../External/mini-gdbstub ARCH=rv32 \
+		CC="$(GDBSTUB_CC) -isysroot $(ISYSROOT) -miphoneos-version-min=15.0" \
+		AR="$(GDBSTUB_AR)"
 
 .PHONY: lc32-build-info
 lc32-build-info:
@@ -129,6 +150,7 @@ lc32-dynarmic-static:
 	cmake $(DYNARMIC_CMAKE_WARNING_FLAGS) \
 		-S "$(DYNARMIC_ROOT)" -B "$(DYNARMIC_BUILD_DIR)" \
 		$(DYNARMIC_CMAKE_POLICY_FLAGS) \
+		$(DYNARMIC_CMAKE_TOOLCHAIN_FLAGS) \
 		-DDYNARMIC_USE_BUNDLED_EXTERNALS=ON \
 		-DDYNARMIC_FRONTENDS=A32 \
 		-DBUILD_TESTING=OFF \

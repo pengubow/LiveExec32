@@ -16,7 +16,11 @@ ISYSROOT ?= $(LC32_GUEST_SDK)
 # The modern Xcode linker can drop ARM32 Thumb bits from function pointers.
 # Resolve the classic linker explicitly; -Wl,-ld_classic is ignored by Xcode 27.
 ifeq ($(origin LC32_GUEST_LINKER),undefined)
+ifeq ($(shell uname -s),Linux)
+LC32_GUEST_LINKER := $(THEOS)/toolchain/linux/iphone/bin/ld
+else
 LC32_GUEST_LINKER := $(shell xcrun --find ld-classic 2>/dev/null)
+endif
 endif
 export LC32_GUEST_LINKER
 # Validate in the build-config prerequisite, not while parsing SDK/clean goals.

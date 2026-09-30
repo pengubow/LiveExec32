@@ -1,6 +1,8 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
+  check-spatial-mixer-pcm-host \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
-  check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
+  check-guest-thumb-linker check-guest-shim-borrowed-arguments \
+  check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host
@@ -29,10 +31,21 @@ OBJC_TRACE_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/objc-trace-,\
   default disabled enabled)
 BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-logging-,\
   present missing)
+SPATIAL_MIXER_PCM_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/spatial-mixer-pcm-host
+
+.PHONY: check-spatial-mixer-pcm-host
+check-spatial-mixer-pcm-host: $(SPATIAL_MIXER_PCM_HOST_TEST)
+	"$(SPATIAL_MIXER_PCM_HOST_TEST)"
+
+$(SPATIAL_MIXER_PCM_HOST_TEST): spatial_mixer_pcm_host.c \
+  ../GuestFrameworks/AudioToolbox/LC32SpatialMixerPCM.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) $(HOST_CFLAGS) spatial_mixer_pcm_host.c -o "$@"
 
 .PHONY: check-guest-bootstrap check-memory-hash \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
-  check-guest-thumb-linker check-uikit-legacy-rootless-rotation-build \
+  check-guest-thumb-linker check-guest-shim-borrowed-arguments \
+  check-uikit-legacy-rootless-rotation-build \
   check-scalar-callback-signature check-guest-timer-queue check-legacy-nib-loading \
   check-mach-exception-ports check-uikit-background-tasks check-mediaplayer-stop \
   check-foundation-ports-host
@@ -92,6 +105,9 @@ $(LEGACY_NIB_LOADING_HOST_TEST): legacy_nib_loading_host.mm \
 
 check-guest-thumb-linker:
 	./guest_thumb_linker.sh
+
+check-guest-shim-borrowed-arguments:
+	sh ./guest_shim_borrowed_arguments.sh
 
 check-uikit-legacy-rootless-rotation-build:
 	sh ./uikit_legacy_rootless_rotation.sh --build-only
@@ -312,6 +328,7 @@ $(eval $(call lc32_guest_test,lc32-cfset-callbacks,cfset_callbacks.m,Foundation 
 $(eval $(call lc32_guest_test,lc32-cfnetwork-http,cfnetwork_http.m,CFNetwork CoreFoundation Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-cfnetwork-host-resolution,cfnetwork_host_resolution.m,CFNetwork CoreFoundation Foundation))
 $(eval $(call lc32_guest_test,lc32-collection-object-buffers,collection_object_buffers.m,Foundation))
+$(eval $(call lc32_guest_test,lc32-foundation-dynamic-framework-class,foundation_dynamic_framework_class.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-class-cluster-reuse,class_cluster_reuse.m,Foundation CoreFoundation LC32))
 $(eval $(call lc32_guest_test,lc32-guest-input-stream,guest_input_stream.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-stream-io,stream_io.m,Foundation CoreFoundation LC32))
@@ -397,6 +414,7 @@ $(eval $(call lc32_guest_test,lc32-opengles-smoke,opengles_smoke.m opengles_es1_
 # UIKit and aggregate-argument bridges.
 $(eval $(call lc32_guest_test,lc32-guest-fp-return,guest_fp_return.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-guest-host-aggregate-arguments,guest_host_aggregate_arguments.m,Foundation UIKit CoreGraphics LC32))
+$(eval $(call lc32_guest_test,lc32-coremedia-time-bridge,coremedia_time_bridge.m,Foundation AVFoundation CoreMedia LC32))
 $(eval $(call lc32_guest_test,lc32-scalar-pointer-bridge,scalar_pointer_bridge.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-text-input-traits,text_input_traits.m,Foundation UIKit LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-appearance,uikit_appearance.m,Foundation UIKit LC32))
@@ -411,6 +429,9 @@ $(eval $(call lc32_guest_test,lc32-uikit-legacy-rotation-duration,uikit_legacy_r
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-nested-renderer,uikit_legacy_nested_renderer.m,Foundation UIKit QuartzCore CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-direct-renderer,uikit_legacy_direct_renderer.m,Foundation UIKit QuartzCore CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-orientation-startup,uikit_orientation_startup.m,Foundation UIKit LC32))
+$(eval $(call lc32_guest_test,lc32-uikit-manual-projection-rotation,uikit_manual_projection_rotation.m,Foundation UIKit QuartzCore CoreGraphics))
+$(eval $(call lc32_guest_test,lc32-uikit-landscape-renderer-startup,uikit_landscape_renderer_startup.m,Foundation UIKit QuartzCore CoreGraphics))
+$(eval $(call lc32_guest_test,lc32-uikit-classic-direct-view-canvas,uikit_classic_direct_view_canvas.m,Foundation UIKit CoreGraphics))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-string-sizing,uikit_legacy_string_sizing.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-window-root,uikit_legacy_window_root.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-view-load-reentrancy,uikit_view_load_reentrancy.m,Foundation UIKit CoreGraphics LC32))
@@ -487,7 +508,13 @@ lc32-uikit-legacy-direct-renderer_CFLAGS := -fno-objc-arc -target armv7s-apple-i
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 lc32-uikit-legacy-direct-renderer_LDFLAGS += -target armv7s-apple-ios7.0
 lc32-uikit-orientation-startup_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0
-lc32-uikit-orientation-startup_LDFLAGS += -target armv7s-apple-ios7.0
+lc32-uikit-orientation-startup_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
+lc32-uikit-manual-projection-rotation_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0
+lc32-uikit-manual-projection-rotation_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
+lc32-uikit-landscape-renderer-startup_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0
+lc32-uikit-landscape-renderer-startup_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
+lc32-uikit-classic-direct-view-canvas_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0
+lc32-uikit-classic-direct-view-canvas_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
 # Per-source flags follow Theos' DEBUG_CFLAGS, which otherwise restore -O0.
 uikit_orientation_startup.m_CFLAGS := -O2
 

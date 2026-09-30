@@ -17,10 +17,11 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 "$GENERATOR_DIR/build.sh"
-"$GENERATOR_DIR/GenerateShimObjC" \
-    "$SIGNATURES" "$staging" \
-    --framework-map "$FRAMEWORK_MAP" \
-    --runtime-uikit
+set -- "$SIGNATURES" "$staging" --framework-map "$FRAMEWORK_MAP"
+if [ "$(uname -s)" = Darwin ]; then
+    set -- "$@" --runtime-uikit
+fi
+"$GENERATOR_DIR/GenerateShimObjC" "$@"
 
 bad_file=$(find "$staging" -type f -name '*.m' \
     ! -exec sh -c 'IFS= read -r line < "$1"; [ "$line" = "// Generated file" ]' sh {} \; \

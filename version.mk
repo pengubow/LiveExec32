@@ -8,7 +8,13 @@ endif
 
 # Stamp only built resources, never tracked plists. Convert before signing so
 # Theos' final-package plist conversion does not change the signed bytes.
+ifeq ($(shell uname -s),Linux)
+define lc32_stamp_version
+python3 "$(LC32_VERSION_ROOT)/Scripts/stamp-version.py" "$(1)" "$(LC32_VERSION)"
+endef
+else
 define lc32_stamp_version
 plutil -replace CFBundleShortVersionString -string "$(LC32_VERSION)" "$(1)"
 plutil -convert binary1 "$(1)"
 endef
+endif

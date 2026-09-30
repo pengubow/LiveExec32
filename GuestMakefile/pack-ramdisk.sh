@@ -15,10 +15,18 @@ BUILD_ROOT=${BUILD_ROOT:-"$SCRIPT_DIR/.theos/obj/armv7s"}
 # pairs that the guest dyld relies on.)  This only runs once, before the
 # first pack.
 RAMDISK_IPSW_URL=${RAMDISK_IPSW_URL:-"http://appldnld.apple.com/ios10.3.3/091-23384-20170719-CA966D80-6977-11E7-9F96-3E9100BA0AE3/iPhone_4.0_32bit_10.3.3_14G60_Restore.ipsw"}
+RAMDISK_LOCAL_IPSW=${RAMDISK_LOCAL_IPSW:-}
 RAMDISK_IPSW_COMPONENT=${RAMDISK_IPSW_COMPONENT:-"058-75249-062.dmg"}
 RAMDISK_IPSW_COMPONENT_SHA256=${RAMDISK_IPSW_COMPONENT_SHA256:-"d50dff8eae1a17cc91369929fdea4dc0cdf815c6b8e11f5809cc16629f3f1a44"}
 RAMDISK_IMAGE_SHA256=${RAMDISK_IMAGE_SHA256:-"3564d16366b053503107288be6cb335b2283cf14838ab64a88017c17a2a6a1bc"}
 RAMDISK_SETUP_DIR=${RAMDISK_SETUP_DIR:-"$REPO_ROOT/tmp/ipsw"}
+if [ -z "${HFSTAR:-}" ]; then
+    if [ -x "$REPO_ROOT/tmp/tools/hfstar" ]; then
+        HFSTAR="$REPO_ROOT/tmp/tools/hfstar"
+    else
+        HFSTAR=hfstar
+    fi
+fi
 
 RAMDISK_ROOT=$(python3 -c \
     'import os, sys; print(os.path.realpath(sys.argv[1]))' "$RAMDISK_ROOT")
@@ -53,26 +61,42 @@ setup_ramdisk() {
         rm -f "$decrypted_image"
         if ! verify_sha256 "$encrypted_image" "$RAMDISK_IPSW_COMPONENT_SHA256"; then
             rm -f "$encrypted_image"
-            echo "Downloading $RAMDISK_IPSW_COMPONENT from the iOS 10.3.3 IPSW" >&2
-            download_attempt=1
-            while :; do
-                download_dir=$(mktemp -d "$RAMDISK_SETUP_DIR/.download.XXXXXX")
-                if (cd "$download_dir" && pzb -g "$RAMDISK_IPSW_COMPONENT" "$RAMDISK_IPSW_URL") \
-                        && verify_sha256 "$download_dir/$RAMDISK_IPSW_COMPONENT" \
-                            "$RAMDISK_IPSW_COMPONENT_SHA256"; then
-                    mv "$download_dir/$RAMDISK_IPSW_COMPONENT" "$encrypted_image"
-                    rm -rf "$download_dir"
-                    break
-                fi
-                rm -rf "$download_dir"
-                download_attempt=$((download_attempt + 1))
-                if [ "$download_attempt" -gt 3 ]; then
-                    echo "Failed to download $RAMDISK_IPSW_COMPONENT" >&2
+            if [ -n "$RAMDISK_LOCAL_IPSW" ]; then
+                if [ ! -f "$RAMDISK_LOCAL_IPSW" ]; then
+                    echo "Local IPSW is unavailable: $RAMDISK_LOCAL_IPSW" >&2
                     exit 1
                 fi
-                echo "Download failed; retrying ($download_attempt/3)" >&2
-                sleep 2
-            done
+                component_tmp=$(mktemp "$RAMDISK_SETUP_DIR/.component.XXXXXX")
+                if ! unzip -p "$RAMDISK_LOCAL_IPSW" "$RAMDISK_IPSW_COMPONENT" \
+                        > "$component_tmp" || \
+                   ! verify_sha256 "$component_tmp" "$RAMDISK_IPSW_COMPONENT_SHA256"; then
+                    rm -f "$component_tmp"
+                    echo "Local IPSW ramdisk component checksum mismatch" >&2
+                    exit 1
+                fi
+                mv "$component_tmp" "$encrypted_image"
+            else
+                echo "Downloading $RAMDISK_IPSW_COMPONENT from the iOS 10.3.3 IPSW" >&2
+                download_attempt=1
+                while :; do
+                    download_dir=$(mktemp -d "$RAMDISK_SETUP_DIR/.download.XXXXXX")
+                    if (cd "$download_dir" && pzb -g "$RAMDISK_IPSW_COMPONENT" "$RAMDISK_IPSW_URL") \
+                            && verify_sha256 "$download_dir/$RAMDISK_IPSW_COMPONENT" \
+                                "$RAMDISK_IPSW_COMPONENT_SHA256"; then
+                        mv "$download_dir/$RAMDISK_IPSW_COMPONENT" "$encrypted_image"
+                        rm -rf "$download_dir"
+                        break
+                    fi
+                    rm -rf "$download_dir"
+                    download_attempt=$((download_attempt + 1))
+                    if [ "$download_attempt" -gt 3 ]; then
+                        echo "Failed to download $RAMDISK_IPSW_COMPONENT" >&2
+                        exit 1
+                    fi
+                    echo "Download failed; retrying ($download_attempt/3)" >&2
+                    sleep 2
+                done
+            fi
         fi
 
         echo "Extracting ramdisk image from Img3" >&2
@@ -85,14 +109,30 @@ setup_ramdisk() {
     fi
 
     mount_point=$(mktemp -d "$RAMDISK_ROOT.attach.XXXXXX")
+    hfs_archive=
     cleanup() {
-        hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+        if [ "$(uname -s)" = Darwin ]; then
+            hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+        fi
+        if [ -n "$hfs_archive" ]; then
+            rm -f "$hfs_archive"
+        fi
         rm -rf "$mount_point"
     }
     trap cleanup EXIT HUP INT TERM
 
-    echo "Mounting decrypted ramdisk" >&2
-    hdiutil attach -nobrowse -readonly "$decrypted_image" -mountpoint "$mount_point" >/dev/null
+    if [ "$(uname -s)" = Linux ]; then
+        echo "Extracting decrypted HFS+ ramdisk" >&2
+        hfs_archive=$(mktemp "$RAMDISK_SETUP_DIR/.ramdisk.tar.XXXXXX")
+        "$HFSTAR" -e "$decrypted_image" "$hfs_archive"
+        tar --no-same-owner --warning=no-unknown-keyword \
+            -C "$mount_point" -xf "$hfs_archive"
+        rm -f "$hfs_archive"
+        hfs_archive=
+    else
+        echo "Mounting decrypted ramdisk" >&2
+        hdiutil attach -nobrowse -readonly "$decrypted_image" -mountpoint "$mount_point" >/dev/null
+    fi
 
     mkdir -p "$RAMDISK_ROOT"
     # -a preserves symlinks and permissions; -H preserves the dylib hardlink
@@ -139,7 +179,9 @@ setup_ramdisk() {
         --exclude='sbin/*' \
         --exclude='mnt*' \
         "$mount_point/" "$RAMDISK_ROOT/"
-    hdiutil detach "$mount_point" >/dev/null
+    if [ "$(uname -s)" = Darwin ]; then
+        hdiutil detach "$mount_point" >/dev/null
+    fi
     rm -rf "$mount_point"
     trap - EXIT HUP INT TERM
 
@@ -233,7 +275,7 @@ for framework_name in $framework_names; do
         echo "Missing framework metadata: $source_plist" >&2
         exit 1
     fi
-    if ! file "$source_binary" | grep -q 'arm_v7s'; then
+    if ! file "$source_binary" | grep -Eq 'arm_?v7s'; then
         echo "Framework is not armv7s: $source_binary" >&2
         exit 1
     fi
@@ -291,7 +333,7 @@ if [ ! -f "$libiconv_license_source" ]; then
     echo "Missing guest libiconv license: $libiconv_license_source" >&2
     exit 1
 fi
-if ! file "$libiconv_source" | grep -q 'arm_v7s'; then
+if ! file "$libiconv_source" | grep -Eq 'arm_?v7s'; then
     echo "Guest libiconv is not armv7s: $libiconv_source" >&2
     exit 1
 fi

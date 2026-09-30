@@ -9,16 +9,23 @@ REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
 fixture=0
 if [ "$#" -eq 0 ]; then
     guest_sdk=${LC32_GUEST_SDK:-"$REPO_ROOT/tmp/iPhoneOS10.3.sdk"}
-    guest_linker=${LC32_GUEST_LINKER:-$(xcrun --find ld-classic)}
+    if [ "$(uname -s)" = Linux ]; then
+        guest_linker=${LC32_GUEST_LINKER:-"$THEOS/toolchain/linux/iphone/bin/ld"}
+        guest_cc="$THEOS/toolchain/linux/iphone/bin/clang"
+    else
+        guest_linker=${LC32_GUEST_LINKER:-$(xcrun --find ld-classic)}
+        guest_cc=$(xcrun --find clang)
+    fi
     if [ ! -d "$guest_sdk" ] || [ ! -x "$guest_linker" ]; then
         echo "Guest SDK or classic linker missing; set LC32_GUEST_SDK/LC32_GUEST_LINKER" >&2
         exit 1
     fi
-    audit_work=$(mktemp -d "${TMPDIR:-/private/tmp}/lc32-thumb-linker.XXXXXX")
+    audit_work=$(mktemp -d "${TMPDIR:-/tmp}/lc32-thumb-linker.XXXXXX")
     trap 'rm -rf "$audit_work"' EXIT HUP INT TERM
-    xcrun clang -target armv7s-apple-ios10.3 -mthumb -O0 \
-        -Wall -Wextra -Werror -isysroot "$guest_sdk" \
-        --ld-path="$guest_linker" "$SCRIPT_DIR/guest_thumb_linker.c" \
+    "$guest_cc" -target armv7s-apple-ios10.3 -mthumb -O0 \
+        -Wall -Wextra -Werror -Wno-error=fuse-ld-path \
+        -isysroot "$guest_sdk" \
+        -fuse-ld="$guest_linker" "$SCRIPT_DIR/guest_thumb_linker.c" \
         -o "$audit_work/guest-thumb-linker"
     echo "Guest Thumb linker: $guest_linker"
     set -- "$audit_work/guest-thumb-linker"

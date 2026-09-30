@@ -29,8 +29,17 @@ version=$(awk '/^Version:/ {
 }' "$root/control")
 [[ $version =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] ||
     fail 'control must contain a numeric Version (for example 0.0.1)'
-bundle_id=$(plutil -extract CFBundleIdentifier raw -expect string -o - \
-    "$root/HostFrameworks/LC32/Resources/Info.plist")
+bundle_id=$(python3 - "$root/HostFrameworks/LC32/Resources/Info.plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], 'rb') as info_file:
+    bundle_id = plistlib.load(info_file).get('CFBundleIdentifier')
+if not isinstance(bundle_id, str):
+    sys.exit('CFBundleIdentifier must be a string')
+print(bundle_id)
+PY
+)
 
 git_value() {
     git -C "$root" "$@" 2>/dev/null || true

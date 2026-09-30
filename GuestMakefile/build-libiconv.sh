@@ -19,7 +19,11 @@ LOCK_FILE="$WORK_ROOT.lock"
 # Select a real classic linker, not the ignored modern -ld_classic switch.
 GUEST_LINKER=${LC32_GUEST_LINKER:-}
 if [ -z "$GUEST_LINKER" ]; then
-    GUEST_LINKER=$(xcrun --find ld-classic 2>/dev/null || true)
+    if [ "$(uname -s)" = Linux ]; then
+        GUEST_LINKER="$THEOS/toolchain/linux/iphone/bin/ld"
+    else
+        GUEST_LINKER=$(xcrun --find ld-classic 2>/dev/null || true)
+    fi
 fi
 if [ -z "$GUEST_LINKER" ]; then
     echo "Classic ARM32 linker unavailable: xcrun --find ld-classic failed" >&2
@@ -139,10 +143,24 @@ if ! validate_source "$SOURCE_ROOT"; then
 fi
 
 mkdir -p "$BUILD_ROOT"
-CC=$(xcrun --find clang)
+if [ "$(uname -s)" = Linux ]; then
+    CC="$THEOS/toolchain/linux/iphone/bin/clang"
+    CROSS_TARGET=armv7s-apple-ios10.3
+else
+    CC=$(xcrun --find clang)
+    CROSS_TARGET=
+fi
+
+run_cc() {
+    if [ -n "$CROSS_TARGET" ]; then
+        "$CC" -target "$CROSS_TARGET" "$@"
+    else
+        "$CC" "$@"
+    fi
+}
 
 compile() {
-    "$CC" -arch armv7s -isysroot "$SDK_ROOT" \
+    run_cc -arch armv7s -isysroot "$SDK_ROOT" \
         -miphoneos-version-min=10.3 -Os -fPIC -fvisibility=default \
         -std=gnu89 -Wno-deprecated-non-prototype \
         -DHAVE_CONFIG_H -DBUILDING_LIBICONV -DBUILDING_LIBCHARSET \
@@ -177,7 +195,7 @@ EOF
 compile "$BUILD_ROOT/version.c" "$BUILD_ROOT/version.o"
 
 output_tmp=$(mktemp "$(dirname "$OUTPUT")/.libiconv.2.dylib.XXXXXX")
-"$CC" -arch armv7s -isysroot "$SDK_ROOT" -miphoneos-version-min=10.3 \
+run_cc -arch armv7s -isysroot "$SDK_ROOT" -miphoneos-version-min=10.3 \
     -fuse-ld="$GUEST_LINKER" \
     -dynamiclib -Wl,-install_name,/usr/lib/libiconv.2.dylib \
     -Wl,-compatibility_version,7 -Wl,-current_version,7 -Wl,-dead_strip \

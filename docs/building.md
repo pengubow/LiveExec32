@@ -17,6 +17,40 @@ The host build configures Dynarmic automatically with CMake and links its
 static libraries into `LiveExec32Shared`. This requires CMake and Boost
 1.57 or newer on the build machine.
 
+### Complete Linux build
+
+Install Theos with its Linux iPhone toolchain and iPhoneOS 16.5 SDK, Clang,
+GNUstep Base development headers and Objective-C runtime, CMake, Boost,
+Python 3, `rsync`, `unzip`, and `hfstar` from
+[hfsfuse](https://github.com/0x09/hfsfuse). The generator runs as a native
+Linux program against GNUstep; the guest frameworks and host app use Theos'
+Apple-targeting Clang. An `ios-clang` wrapper configured for arm64 cannot
+replace the armv7s guest compiler.
+
+With a local iOS 10.3.3 iPhone 5 IPSW, run the complete packaging sequence:
+
+```bash
+export THEOS=/path/to/theos
+export RAMDISK_LOCAL_IPSW=/path/to/iPhone_4.0_32bit_10.3.3_14G60_Restore.ipsw
+install -Dm755 /path/to/hfstar tmp/tools/hfstar
+git submodule update --init --recursive
+make -C GuestMakefile generate-shims
+make -C GuestMakefile -j4
+PATH="$THEOS/toolchain/linux/iphone/bin:$PATH" ./GuestMakefile/pack-ramdisk.sh
+make package PACKAGE_FORMAT=deb THEOS_PACKAGE_SCHEME=rootless
+make package
+```
+
+The packages appear under `packages/`. The generator reads the tracked
+Objective-C signatures, including 13 private UIKit classes, from
+`Generator/templates/generated.plist`. The matching nightly guest UIKit image
+was used to capture those classes' armv7s method encodings. Linux does not
+need a running Catalyst UIKit for generation. The `tmp/` directory is an
+ignored, disk-backed cache inside the repository; its SDK, IPSW components,
+and `tmp/tools/hfstar` survive a reboot.
+Linux version stamping uses Python's `plistlib`, so neither Apple's
+`plutil -replace` command nor a temporary `plutil` wrapper is required.
+
 ## Guest frameworks
 
 Generate the guest Objective-C shims, then build the frameworks:
@@ -34,8 +68,9 @@ diagnosing an isolated Clang module-cache issue.
 
 ### ARM32 linker
 
-ARM32 guest frameworks, tests, and libiconv require a classic linker,
-resolved with `xcrun --find ld-classic`. Newer Xcode linkers can emit
+ARM32 guest frameworks, tests, and libiconv require a classic linker. macOS
+resolves it with `xcrun --find ld-classic`; Linux selects the Apple linker in
+`$THEOS/toolchain/linux/iphone/bin/ld`. Newer Xcode linkers can emit
 incorrect Thumb initializer pointers, and `-Wl,-ld_classic` no longer
 selects the classic linker. If the selected toolchain does not provide it,
 choose a toolchain that does or pass
@@ -70,6 +105,12 @@ output marshalling and the captured-template disabled-method baseline.
 Build the corresponding ARM32 runtime regression with
 `gmake -C test object-out-parameters`.
 
+Run `sh Generator/GenerateShimAPI/test-coremedia-time.sh` to check generated
+by-value `CMTime` arguments and returns, including the video writer's pixel
+buffer argument. Build the native API round-trip regression with
+`gmake -C test coremedia-time-bridge`. Its runtime assertions require
+LiveExec32 on iOS; a Linux build verifies compilation and linking only.
+
 See [Objective-C proxy bridge](ObjCProxy.md) for the bridge design and
 marshalling contracts.
 
@@ -99,12 +140,17 @@ the guest dyld relies on). The download and extracted image are cached
 under `tmp/ipsw/`, so subsequent runs only reinstall the rebuilt
 frameworks.
 
-Override the sources with `RAMDISK_IPSW_URL`, `RAMDISK_IPSW_COMPONENT`,
+Set `RAMDISK_LOCAL_IPSW` to extract the component from an existing IPSW with
+`unzip`. Linux uses `hfstar` and GNU tar to read the decrypted HFS+ image.
+The script first checks `tmp/tools/hfstar`, then `PATH`; set `HFSTAR` to an
+explicit executable path to override either choice. macOS uses
+`hdiutil`. Override the sources with `RAMDISK_IPSW_URL`, `RAMDISK_IPSW_COMPONENT`,
 `RAMDISK_IPSW_COMPONENT_SHA256`, `RAMDISK_IMAGE_SHA256`,
 `RAMDISK_SETUP_DIR`, and `RAMDISK_ROOT`. Framework bundle metadata is
 tracked under `GuestMakefile/FrameworkInfoPlists`; override that snapshot
 with `FRAMEWORK_INFO_ROOT`, or set `IOS_SYSTEM_ROOT` to test against another
-mounted system image. Requires `pzb`, Python 3, `hdiutil`, and `rsync`.
+mounted system image. The remote download path requires `pzb`; all paths
+require Python 3 and `rsync`.
 
 ## Assemble the host app
 

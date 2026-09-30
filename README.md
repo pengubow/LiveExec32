@@ -54,10 +54,10 @@ On the iOS device, launch an ARM32 binary with the installed app's executable:
 Hand-written guest framework code lives in `GuestFrameworks/<Framework>` and
 is tracked. `GuestFrameworks/.generated/<Framework>` is recreated by
 `GuestMakefile/generate-shims.sh` and is intentionally ignored; do not commit
-files from it. The generator currently obtains 12 private UIKit fallback
-classes from the installed Catalyst runtime, so those particular shims remain
-host-dependent until their iOS 10 signatures are captured in the tracked
-templates.
+files from it. The signatures for 13 private UIKit fallback classes are
+captured in `Generator/templates/generated.plist`, so Linux and macOS
+generate the same guest class and method set. On macOS the optional Catalyst
+runtime pass keeps those captured classes.
 
 ## FAQ
 ### Can this be used to run 32-bit apps & integrate to LiveContainer?
