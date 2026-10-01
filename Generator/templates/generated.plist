@@ -99154,6 +99154,13 @@
 				<string>f8@0:4</string>
 			</dict>
 		</dict>
+		<key>UIRoundedRectButton</key>
+		<dict>
+			<key>+</key>
+			<dict/>
+			<key>-</key>
+			<dict/>
+		</dict>
 		<key>UIScreen</key>
 		<dict>
 			<key>+</key>

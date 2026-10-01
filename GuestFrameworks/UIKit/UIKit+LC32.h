@@ -36,6 +36,12 @@ static inline UIEdgeInsets_64 LC32HostUIEdgeInsets(const UIEdgeInsets guest) {
 @interface UINibDecoder : NSObject
 @end
 
+/* Early keyed nibs archive this iOS 10 runtime class by name. Its decoder
+ * and button behavior are inherited from UIButton, so expose the class to
+ * the normal guest/native class bridge without replacing individual nibs. */
+@interface UIRoundedRectButton : UIButton
+@end
+
 @interface UIDeviceRGBColor : UIColor
 @end
 @interface UIDeviceWhiteColor : UIColor
