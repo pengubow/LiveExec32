@@ -63,6 +63,8 @@ static void check(const char *name, BOOL passed) {
     UIViewController *_controller;
     UIButton *_button;
     UIView *_overlay;
+    UIView *_lateOverlay;
+    UIViewController *_lateController;
     UIView *_canvasView;
     CGRect _launchBounds;
     CGRect _buttonFrame;
@@ -106,6 +108,7 @@ static void check(const char *name, BOOL passed) {
     _launchBounds.size.height *= 0.75;
 #endif
     _window = [[UIWindow alloc] initWithFrame:_launchBounds];
+    [_window setBackgroundColor:UIColor.whiteColor];
 #if LC32_TEST_DIRECT_GL_RENDERER
     /* The app can show its window before creating or attaching the renderer.
      * Adoption must also work at the completed launch/activation boundary. */
@@ -164,6 +167,24 @@ static void check(const char *name, BOOL passed) {
     check("scene-honors-explicit-side", YES);
 #endif
     if(!_expanded) {
+        /* A controller can be attached directly after the native root has
+         * already captured the drawable. Its portrait content must join the
+         * same canvas rather than acquiring the outer scene's coordinates. */
+        _lateOverlay = [[UIView alloc] initWithFrame:_launchBounds];
+        [_lateOverlay setUserInteractionEnabled:NO];
+        _lateController = [[LC32ClassicDirectController alloc] init];
+        [_lateController setView:_lateOverlay];
+        [_window addSubview:_lateOverlay];
+        [_window insertSubview:_lateOverlay belowSubview:_overlay];
+        [_window bringSubviewToFront:_overlay];
+        NSArray *content = [_window subviews];
+        check("late-content-is-in-window-stack", [content count] == 3 &&
+            [content indexOfObject:_canvasView] < [content indexOfObject:_lateOverlay] &&
+            [content indexOfObject:_lateOverlay] < [content indexOfObject:_overlay]);
+        [_window setBackgroundColor:UIColor.blueColor];
+        check("late-window-background-setter-preserved",
+            [[_window backgroundColor] isEqual:UIColor.blueColor]);
+        [_window setBackgroundColor:UIColor.whiteColor];
         [self checkCanvasGeometry];
         const CGRect frame = [_window frame];
         const CGRect expanded = CGRectMake(frame.origin.x, frame.origin.y,
@@ -227,6 +248,17 @@ static void check(const char *name, BOOL passed) {
     check("canvas-bounds-preserved", CGRectEqualToRect([view bounds], _launchBounds));
     check("button-frame-preserved", CGRectEqualToRect([_button frame], _buttonFrame));
     check("overlay-frame-preserved", CGRectEqualToRect([_overlay frame], _overlayFrame));
+    check("late-overlay-geometry-preserved",
+        CGRectEqualToRect([_lateOverlay bounds], _launchBounds) &&
+        CGRectEqualToRect([_lateOverlay frame], _launchBounds));
+    check("late-controller-keeps-its-view",
+        [_lateOverlay nextResponder] == _lateController);
+    check("late-overlay-turns-and-fits-with-renderer",
+        [_lateOverlay superview] == [view superview] &&
+        CGRectEqualToRect([_lateOverlay convertRect:[_lateOverlay bounds]
+                                           toView:_window], displayed));
+    check("window-background-preserved",
+        [[_window backgroundColor] isEqual:UIColor.whiteColor]);
     check("centered-in-expanded-viewport",
         fabs(CGRectGetMidX(displayed) - CGRectGetMidX(viewport)) < 0.5 &&
         fabs(CGRectGetMidY(displayed) - CGRectGetMidY(viewport)) < 0.5);
@@ -258,6 +290,8 @@ static void check(const char *name, BOOL passed) {
 }
 
 - (void)dealloc {
+    [_lateController release];
+    [_lateOverlay release];
     [_overlay release];
     [_button release];
     [_controller release];

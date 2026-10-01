@@ -2821,6 +2821,16 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
      * tracing before the dispatch path has rejected it.
     */
     LC32OperationTraceRawSelector(receiver, selector, args[0]);
+    LC32HostInvocationReceiverGuard windowContentGuard;
+    id windowContent = LC32UIKitGuestWindowContentReceiver(receiver, selector);
+    if(windowContent) {
+        /* Keep both the original window and the actual receiver alive, even
+         * if an attachment callback replaces the native root. Resolve the
+         * method and dispatch mode from the actual target below. */
+        windowContentGuard.acquireUnmapped(windowContent);
+        receiver = windowContent;
+        host_self = (u64)(uintptr_t)windowContent;
+    }
     if(selector == @selector(selector) &&
             [receiver isKindOfClass:NSInvocation.class]) {
         SEL invocationSelector = [(NSInvocation *)receiver selector];

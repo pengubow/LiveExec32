@@ -34,6 +34,21 @@ static inline CALayer *LC32NativeViewLayer(UIView *view) {
     return view ? getter(view, @selector(layer)) : nil;
 }
 
+static inline UIColor *LC32NativeViewBackgroundColor(UIView *view) {
+    using Getter = UIColor *(*)(id, SEL);
+    static Getter getter = reinterpret_cast<Getter>(
+        class_getMethodImplementation(UIView.class, @selector(backgroundColor)));
+    return view ? getter(view, @selector(backgroundColor)) : nil;
+}
+
+static inline void LC32NativeSetViewBackgroundColor(
+        UIView *view, UIColor *color) {
+    using Setter = void (*)(id, SEL, UIColor *);
+    static Setter setter = reinterpret_cast<Setter>(
+        class_getMethodImplementation(UIView.class, @selector(setBackgroundColor:)));
+    if(view) setter(view, @selector(setBackgroundColor:), color);
+}
+
 static inline CGPoint LC32NativeConvertViewPoint(
         UIView *view, CGPoint point, UIView *sourceView) {
     using Converter = CGPoint (*)(id, SEL, CGPoint, UIView *);

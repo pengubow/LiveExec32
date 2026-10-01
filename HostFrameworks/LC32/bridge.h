@@ -124,6 +124,7 @@ u32 LC32UIKitLegacyCompatibilityEnabled(void);
 // guest methods have been mirrored but before the class is registered.
 void LC32UIKitPrepareGuestClass(Class cls);
 bool LC32UIKitGetViewDuringGuestLoad(id controller, id *view);
+id LC32UIKitGuestWindowContentReceiver(id window, SEL selector);
 void LC32UIKitScheduleLegacyOverlayLayout(id object, id addedSubview);
 void LC32UIKitDidSetGuestAutoresizingMask(id object);
 

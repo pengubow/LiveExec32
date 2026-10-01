@@ -85,6 +85,7 @@ typedef NS_ENUM(NSUInteger, LC32LegacyIPadGeometryMode) {
     NSArray<UIView *> *_classicSubviews;
 }
 @property(nonatomic) CGRect classicCanvasBounds;
+@property(nonatomic, readonly) UIView *classicCanvasView;
 @property(nonatomic, copy) NSArray<UIView *> *classicSubviews;
 - (void)fitClassicCanvasInWindow:(UIWindow *)window;
 @end
@@ -968,6 +969,15 @@ void LC32NativeSetWindowRootViewController(
         UIWindow *window, UIViewController *controller) {
     Class dispatchClass = LC32NativeWindowDispatchClass(window);
     if(!window || !dispatchClass) return;
+    LC32LegacyWindowRootController *directRoot =
+        LC32ClassicDirectViewRoot(window);
+    if(directRoot && directRoot != controller) {
+        /* The fixed canvas owns the guest's background while the outer
+         * window follows the scene. Restore it if the guest replaces that
+         * presentation with an ordinary root controller. */
+        LC32NativeSetViewBackgroundColor(window,
+            LC32NativeViewBackgroundColor(directRoot.classicCanvasView));
+    }
     if(LC32UIKitLegacyCompatibilityEnabled() &&
             ![controller isKindOfClass:LC32LegacyWindowRootController.class]) {
         LC32RestoreRootlessRendererAutoresizing(window);
@@ -2957,6 +2967,10 @@ bool LC32InstallLegacyDirectSubviewRoot(UIWindow *window) {
         controller.wantsFullScreenLayout = YES;
     }
     [controller view];
+    if(preservesClassicCanvas) {
+        controller.classicCanvasView.backgroundColor =
+            LC32NativeViewBackgroundColor(window);
+    }
     /* The hierarchy now owns these views. Keeping the transfer list would
      * retain guest views after the application removes them from its canvas. */
     controller.classicSubviews = nil;
@@ -2970,6 +2984,10 @@ bool LC32InstallLegacyDirectSubviewRoot(UIWindow *window) {
          * relative order, including any private UIKit overlay. */
         LC32NativeSendSubviewToBack(window, controller.view);
         if(preservesClassicCanvas) {
+            /* An archived opaque background belongs to the measured guest
+             * surface, just like its children. Painting the expanded scene
+             * with it would expose a different backdrop after activation. */
+            LC32NativeSetViewBackgroundColor(window, UIColor.clearColor);
             LC32ObserveClassicCanvasScene(window.windowScene);
             LC32ScaleLegacyIPadWindow(window);
         }
@@ -3264,6 +3282,29 @@ extern "C" void LC32UIKitDidSetGuestAutoresizingMask(id object) {
     }
 }
 
+extern "C" id LC32UIKitGuestWindowContentReceiver(id object, SEL selector) {
+    if(selector != @selector(addSubview:) &&
+            selector != @selector(insertSubview:atIndex:) &&
+            selector != @selector(insertSubview:aboveSubview:) &&
+            selector != @selector(insertSubview:belowSubview:) &&
+            selector != @selector(bringSubviewToFront:) &&
+            selector != @selector(sendSubviewToBack:) &&
+            selector != @selector(exchangeSubviewAtIndex:withSubviewAtIndex:) &&
+            selector != @selector(subviews) &&
+            selector != @selector(backgroundColor) &&
+            selector != @selector(setBackgroundColor:)) return nil;
+    if(!pthread_main_np() || ![object isKindOfClass:UIWindow.class] ||
+            ![object guest_selfOrNull]) return nil;
+    LC32LegacyWindowRootController *root =
+        LC32ClassicDirectViewRoot((UIWindow *)object);
+    /* The root transfers the initial children into this fixed coordinate
+     * space. Subsequent guest insertions and reordering must use it too;
+     * attaching first to the outer window would cause two window moves and
+     * let native controller setup see the scene's unrelated coordinates.
+     * Only guest sends pass here. UIKit's own window overlays stay native. */
+    return root.classicCanvasView;
+}
+
 extern "C" void LC32UIKitScheduleLegacyOverlayLayout(
         id object, id addedSubview) {
     if(!LC32UIKitLegacyCompatibilityEnabled()) return;
@@ -3325,6 +3366,7 @@ extern "C" bool LC32UIKitGetViewDuringGuestLoad(
 @implementation LC32LegacyWindowRootController
 
 @synthesize classicCanvasBounds = _classicCanvasBounds;
+@synthesize classicCanvasView = _classicCanvasView;
 @synthesize classicSubviews = _classicSubviews;
 
 - (void)viewDidLayoutSubviews {
