@@ -3,6 +3,7 @@
 #include "crash_exception.h"
 #include "guest_dispatch.h"
 #include "LC32ObjCBridgeABI.h"
+#include "LC32InvocationABI.h"
 #include "LC32CoreMediaTimeABI.h"
 #include "LC32DebugLog.h"
 #import "../UIKit/LegacyNibLoading.h"
@@ -1906,10 +1907,14 @@ static bool LC32ReadGuestInvocationValue(u32 guestStorage, T &value) {
         read_guest_memory_with_permissions(guestStorage, &value, sizeof(value), PROT_READ);
 }
 
+using LC32HostInvocationStorage =
+    std::array<u8, LC32InvocationMaxValueBytes>;
+
 template<typename T>
 static void LC32StoreHostInvocationValue(
-        std::array<u8, 16> &storage, T value) {
-    static_assert(sizeof(value) <= 16, "invocation value exceeds staging");
+        LC32HostInvocationStorage &storage, T value) {
+    static_assert(sizeof(value) <= LC32InvocationMaxValueBytes,
+        "invocation value exceeds staging");
     memcpy(storage.data(), &value, sizeof(value));
 }
 
@@ -1920,7 +1925,7 @@ static void LC32StoreHostInvocationValue(
  * letting Foundation read eight-byte pointers from four-byte guest values.
  */
 static bool LC32PrepareHostInvocationValue(const char *type, u32 guestStorage,
-        std::array<u8, 16> &hostStorage) {
+        LC32HostInvocationStorage &hostStorage) {
     if(!guestStorage) return false;
     while(type && *type && strchr("rnNoORVA", *type)) type++;
     if(!type || !*type) return false;
@@ -2044,6 +2049,14 @@ static bool LC32PrepareHostInvocationValue(const char *type, u32 guestStorage,
             LC32StoreHostInvocationValue(hostStorage, value);
             return nativeSize == sizeof(value);
         }
+        case '{': {
+            LC32InvocationFloatingLayout layout;
+            return LC32InvocationGetFloatingLayout(type, &layout) &&
+                nativeSize == layout.byteSize &&
+                u64(guestStorage) + layout.byteSize <= (UINT64_C(1) << 32) &&
+                read_guest_memory_with_permissions(guestStorage,
+                    hostStorage.data(), layout.byteSize, PROT_READ);
+        }
         default:
             return false;
     }
@@ -2051,7 +2064,7 @@ static bool LC32PrepareHostInvocationValue(const char *type, u32 guestStorage,
 
 static bool LC32PrepareHostInvocationArgument(
         NSInvocation *invocation, u32 guestStorage, int32_t argumentIndex,
-        std::array<u8, 16> &hostStorage) {
+        LC32HostInvocationStorage &hostStorage) {
     if(!invocation || argumentIndex < 0) return false;
     NSMethodSignature *signature = invocation.methodSignature;
     return signature &&
@@ -2060,16 +2073,16 @@ static bool LC32PrepareHostInvocationArgument(
             (NSUInteger)argumentIndex], guestStorage, hostStorage);
 }
 
-// NSInvocation's buffers use native ABI sizes even when the original method
-// signature came from guest metadata. Only scalar/object/selector values are
-// supported here; never copy a native pointer or aggregate into ARM32 storage.
+// Object/selector storage uses native pointer sizes. Floating records preserve
+// their explicitly encoded field widths and contain no pointers to translate.
 static bool LC32CopyHostInvocationValueToGuest(const char *type,
-        const std::array<u8, 16> &hostStorage, u32 guestStorage) {
+        const LC32HostInvocationStorage &hostStorage, u32 guestStorage) {
     while(type && *type && strchr("rnNoORVA", *type)) type++;
     if(!type || !*type) return false;
     u64 bits = 0;
     memcpy(&bits, hostStorage.data(), sizeof(bits));
     size_t guestSize;
+    const void *source = &bits;
     switch(*type) {
         case 'v': return true;
         case '@':
@@ -2086,10 +2099,17 @@ static bool LC32CopyHostInvocationValueToGuest(const char *type,
         case 'i': case 'I': case 'l': case 'L': case 'f':
             guestSize = 4; break;
         case 'q': case 'Q': case 'd': guestSize = 8; break;
+        case '{': {
+            LC32InvocationFloatingLayout layout;
+            if(!LC32InvocationGetFloatingLayout(type, &layout)) return false;
+            guestSize = layout.byteSize;
+            source = hostStorage.data();
+            break;
+        }
         default: return false;
     }
     return guestStorage && u64(guestStorage) + guestSize <= (UINT64_C(1) << 32) &&
-        write_guest_memory_with_permissions(guestStorage, &bits, guestSize, PROT_WRITE);
+        write_guest_memory_with_permissions(guestStorage, source, guestSize, PROT_WRITE);
 }
 
 static bool LC32TransferHostInvocationValue(NSInvocation *invocation,
@@ -2103,12 +2123,12 @@ static bool LC32TransferHostInvocationValue(NSInvocation *invocation,
     const char *unqualified = type;
     while(unqualified && *unqualified && strchr("rnNoORVA", *unqualified)) unqualified++;
     if(!argument && unqualified && *unqualified == 'v') return true;
-    if(!unqualified || !*unqualified || !strchr("@#:BcCsSiIlLqQfd", *unqualified))
+    if(!unqualified || !*unqualified || !strchr("@#:BcCsSiIlLqQfd{", *unqualified))
         return false;
     if(unqualified[0] == '@' && unqualified[1] == '?') return false;
     NSUInteger size = 0;
     NSGetSizeAndAlignment(type, &size, nullptr);
-    alignas(16) std::array<u8, 16> storage = {};
+    alignas(16) LC32HostInvocationStorage storage = {};
     if(!size || size > storage.size()) return false;
     if(selector == @selector(setReturnValue:)) {
         if(!LC32PrepareHostInvocationValue(type, guestStorage, storage)) return false;
@@ -2780,7 +2800,7 @@ u64 LC32InvokeHostSelector(u64 host_self, u64 host_cmd, u64 va_args) {
     double floatingIndirectDoubleStorage[9] = {};
     alignas(16) std::array<u8, 64> aggregateHostStorage[9] = {};
     size_t aggregateHostSize[9] = {};
-    alignas(16) std::array<u8, 16> invocationHostStorage[9] = {};
+    alignas(16) LC32HostInvocationStorage invocationHostStorage[9] = {};
     std::unique_ptr<u64[]> objectArrayHostStorage[9];
     SEL selector = (SEL)host_cmd;
     LC32HostInvocationReceiverGuard receiverGuard;
@@ -4913,6 +4933,73 @@ static u64 LC32InvokeGuestSelectorPointObject(
     };
     return LC32InvokeGuestSelectorWords(
         self, _cmd, words, sizeof(words) / sizeof(*words));
+}
+
+template<typename Float, unsigned Count>
+struct LC32NativeFloatingRecord {
+    Float fields[Count];
+};
+
+/* A native invocation of {CGPoint=ff} supplies s0/s1, while {CGPoint=dd}
+ * supplies d0/d1. Keep the signature's field widths instead of interpreting
+ * either record as integer-register arguments or assuming native CGFloat. */
+template<typename GuestFloat, typename HostFloat, unsigned Count>
+static void LC32InvokeGuestSelectorFloatingRecord(id self, SEL selector,
+        LC32NativeFloatingRecord<HostFloat, Count> record) {
+    u32 words[Count * sizeof(GuestFloat) / sizeof(u32)];
+    for(unsigned index = 0; index < Count; index++) {
+        const GuestFloat value = static_cast<GuestFloat>(record.fields[index]);
+        memcpy(reinterpret_cast<u8 *>(words) + index * sizeof(value),
+            &value, sizeof(value));
+    }
+    LC32InvokeGuestSelectorWordsRaw(self, selector, words,
+        sizeof(words) / sizeof(*words));
+}
+
+template<typename GuestFloat, typename HostFloat>
+static IMP LC32FloatingRecordImplementation(unsigned count) {
+    switch(count) {
+        case 1:
+            return (IMP)&LC32InvokeGuestSelectorFloatingRecord<GuestFloat, HostFloat, 1>;
+        case 2:
+            return (IMP)&LC32InvokeGuestSelectorFloatingRecord<GuestFloat, HostFloat, 2>;
+        case 3:
+            return (IMP)&LC32InvokeGuestSelectorFloatingRecord<GuestFloat, HostFloat, 3>;
+        case 4:
+            return (IMP)&LC32InvokeGuestSelectorFloatingRecord<GuestFloat, HostFloat, 4>;
+        default:
+            return nullptr;
+    }
+}
+
+static bool LC32VoidFloatingRecordSignature(const char *types,
+        LC32InvocationFloatingLayout &layout, std::string &argumentType) {
+    if(!types) return false;
+    // This matcher sees every guest method. Check the supported shape before
+    // asking Foundation to parse unrelated legacy C++ records or unions.
+    const char *cursor = types;
+    for(const char *implicitType = "v@:"; *implicitType; implicitType++) {
+        while(*cursor && strchr("rnNoORVA", *cursor)) cursor++;
+        if(*cursor != *implicitType) return false;
+        cursor++;
+        if(*cursor == '+' || *cursor == '-') {
+            cursor++;
+            if(*cursor < '0' || *cursor > '9') return false;
+        }
+        while(*cursor >= '0' && *cursor <= '9') cursor++;
+    }
+    const char *argument = cursor;
+    LC32InvocationFloatingLayout candidate = {};
+    if(!LC32InvocationScanFloatingRecord(&cursor, 0, &candidate)) return false;
+    const char *end = cursor;
+    if(*cursor == '+' || *cursor == '-') {
+        cursor++;
+        if(*cursor < '0' || *cursor > '9') return false;
+    }
+    while(*cursor >= '0' && *cursor <= '9') cursor++;
+    if(*cursor) return false;
+    argumentType.assign(argument, end - argument);
+    return LC32InvocationGetFloatingLayout(argumentType.c_str(), &layout);
 }
 
 static float LC32InvokeGuestSelectorCGRectGuestFloatHostFloat(
@@ -7730,6 +7817,33 @@ static const char *LC32ExpectedHostMethodTypes(Class cls, SEL selector) {
         implementation =
             (IMP)&LC32InvokeGuestSelectorCGRectToCGRect;
         installedMethodTypes = expectedHostTypes;
+    }
+    LC32InvocationFloatingLayout guestRecord;
+    std::string recordArgument;
+    std::string recordMethodTypes;
+    if(LC32VoidFloatingRecordSignature(
+            guestMethodTypes, guestRecord, recordArgument)) {
+        LC32InvocationFloatingLayout hostRecord;
+        std::string hostRecordArgument;
+        const bool nativeRecord = LC32VoidFloatingRecordSignature(
+            expectedHostTypes, hostRecord, hostRecordArgument) &&
+            hostRecord.fieldCount == guestRecord.fieldCount;
+        const char hostField = nativeRecord
+            ? hostRecord.fieldType : guestRecord.fieldType;
+        if(guestRecord.fieldType == 'f') {
+            implementation = hostField == 'd'
+                ? LC32FloatingRecordImplementation<float, double>(guestRecord.fieldCount)
+                : LC32FloatingRecordImplementation<float, float>(guestRecord.fieldCount);
+        } else {
+            implementation = hostField == 'f'
+                ? LC32FloatingRecordImplementation<double, float>(guestRecord.fieldCount)
+                : LC32FloatingRecordImplementation<double, double>(guestRecord.fieldCount);
+        }
+        // Native callers compute their own receiver/selector offsets. The
+        // explicit record keeps its declared fields, including guest floats.
+        recordMethodTypes = "v@:" + recordArgument;
+        installedMethodTypes = nativeRecord
+            ? expectedHostTypes : recordMethodTypes.c_str();
     }
     return class_addMethod(cls, sel, implementation, installedMethodTypes) ||
         class_getInstanceMethod(cls, sel) != nullptr;

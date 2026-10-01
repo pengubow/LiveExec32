@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -301,6 +302,138 @@ static void directForwarding(void) {
         directTargetDeallocations == 1 && fastDeallocations == 1);
 }
 
+@protocol LC32StoredGeometryMessages
+- (void)recordPoint:(CGPoint)point;
+- (void)recordRect:(CGRect)rect;
+@end
+
+static CGPoint recordedPoint;
+static CGRect recordedRect;
+static unsigned geometryCallbacks;
+
+@interface LC32StoredGeometryTarget : NSObject <LC32StoredGeometryMessages>
+@end
+
+@implementation LC32StoredGeometryTarget
+- (void)recordPoint:(CGPoint)point {
+    recordedPoint = point;
+    geometryCallbacks++;
+}
+
+- (void)recordRect:(CGRect)rect {
+    recordedRect = rect;
+    geometryCallbacks++;
+}
+@end
+
+/* Like CCStoredMessages, retain a forwarded invocation without its target,
+ * then deliver it after the original ARM32 argument registers are gone. */
+@interface LC32StoredGeometryProxy : NSObject {
+    id _target;
+    NSMutableArray *_messages;
+}
+- (instancetype)initWithTarget:(id)target;
+- (void)replay;
+@end
+
+@implementation LC32StoredGeometryProxy
+- (instancetype)initWithTarget:(id)target {
+    self = [super init];
+    if(self) {
+        _target = [target retain];
+        _messages = [NSMutableArray new];
+    }
+    return self;
+}
+
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector {
+    return [_target methodSignatureForSelector:selector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    invocation.target = nil;
+    [invocation retainArguments];
+    [_messages addObject:invocation];
+}
+
+- (void)replay {
+    for(NSInvocation *invocation in _messages) {
+        [invocation invokeWithTarget:_target];
+        invocation.target = nil;
+    }
+    [_messages removeAllObjects];
+}
+
+- (void)dealloc {
+    [_messages release];
+    [_target release];
+    [super dealloc];
+}
+@end
+
+@protocol LC32GeometryStackMessages
+- (uint32_t)checkPrefix:(uint32_t)prefix point:(CGPoint)point tail:(uint32_t)tail;
+@end
+
+@interface LC32GeometryStackProxy : NSProxy
+@end
+
+@implementation LC32GeometryStackProxy
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector {
+    if(selector != @selector(checkPrefix:point:tail:)) return nil;
+    char encoding[128];
+    snprintf(encoding, sizeof(encoding), "I@:I%sI", @encode(CGPoint));
+    return [NSMethodSignature signatureWithObjCTypes:encoding];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    struct {
+        uint32_t before;
+        CGPoint value;
+        uint32_t after;
+    } point = {0x12345678, {0, 0}, 0x87654321};
+    uint32_t prefix = 0;
+    uint32_t tail = 0;
+    [invocation getArgument:&prefix atIndex:2];
+    [invocation getArgument:&point.value atIndex:3];
+    [invocation getArgument:&tail atIndex:4];
+    const BOOL intact = point.before == 0x12345678 && point.after == 0x87654321;
+    const uint32_t result = intact && point.value.x == -3.125 && point.value.y == 7.75
+        ? prefix ^ tail : 0;
+    [invocation setReturnValue:(void *)&result];
+}
+@end
+
+static void storedGeometryForwarding(void) {
+    @autoreleasepool {
+        LC32StoredGeometryTarget *target = [LC32StoredGeometryTarget new];
+        LC32StoredGeometryProxy *proxy =
+            [[LC32StoredGeometryProxy alloc] initWithTarget:target];
+        const CGPoint point = {12.5, -7.75};
+        const CGRect rect = {{-3.125, 2.25}, {31.75, 47.5}};
+        [(id<LC32StoredGeometryMessages>)proxy recordPoint:point];
+        [(id<LC32StoredGeometryMessages>)proxy recordRect:rect];
+        check("stored-geometry-is-deferred", geometryCallbacks == 0);
+        [proxy replay];
+        check("stored-point-invokes-guest-floating-registers",
+            recordedPoint.x == point.x && recordedPoint.y == point.y);
+        check("stored-nested-rect-invokes-guest-floating-registers",
+            memcmp(&recordedRect, &rect, sizeof(rect)) == 0);
+        check("stored-geometry-replays-once", geometryCallbacks == 2);
+        [proxy replay];
+        check("stored-geometry-queue-is-cleared", geometryCallbacks == 2);
+        [proxy release];
+        [target release];
+
+        id<LC32GeometryStackMessages> split = (id)[LC32GeometryStackProxy alloc];
+        const CGPoint splitPoint = {-3.125, 7.75};
+        check("forwarded-point-r3-stack-split-and-tail",
+            [split checkPrefix:0x12345678 point:splitPoint tail:0x87654321] ==
+                (0x12345678 ^ 0x87654321));
+        [(id)split release];
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef LC32_NSPROXY_NATIVE_CHECK
@@ -370,6 +503,7 @@ int main(void) {
     check("both-proxies-deallocated-once", deallocations == 2);
 #endif
     directForwarding();
+    storedGeometryForwarding();
     printf("NSProxy bridge summary: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

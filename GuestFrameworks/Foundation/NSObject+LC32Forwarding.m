@@ -1,6 +1,7 @@
 #import <Foundation/Foundation+LC32.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#include <LC32InvocationABI.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -64,6 +65,12 @@ static unsigned LC32ForwardingTypeWords(const char *type, BOOL result) {
         case 'i': case 'I': case 'l': case 'L': case 'f':
         case '#': case ':': return 1;
         case '@': return type[1] == '?' ? UINT32_MAX : 1;
+        case '{': {
+            LC32InvocationFloatingLayout layout;
+            if(!result && LC32InvocationGetFloatingLayout(type, &layout))
+                return (unsigned)(layout.byteSize / sizeof(uint32_t));
+            return UINT32_MAX;
+        }
         default: return UINT32_MAX;
     }
 }
@@ -126,8 +133,8 @@ uint64_t LC32GuestForwardInvocation(const uint32_t *words, uint32_t stret) {
     size_t word = 2;
     for(NSUInteger index = 2; index < argumentCount; ++index) {
         [invocation setArgument:(void *)&words[word] atIndex:index];
-        /* Apple's ARM32 Objective-C ABI packs scalar words at four-byte
-         * alignment, including q/d split across r3 and the first stack word. */
+        /* Apple's ARM32 Objective-C ABI packs these scalar and floating-record
+         * words at four-byte alignment, including r3/stack splits. */
         word += widths[index - 2];
     }
     [receiver forwardInvocation:invocation];

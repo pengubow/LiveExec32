@@ -1,4 +1,5 @@
 LC32_HOST_TEST_GOALS := check-guest-bootstrap check-memory-hash \
+  check-invocation-floating-aggregate-host \
   check-spatial-mixer-pcm-host \
   check-coremedia-time-values-host check-debug-logging check-objc-trace check-build-info \
   check-guest-thumb-linker check-guest-shim-borrowed-arguments \
@@ -32,6 +33,17 @@ OBJC_TRACE_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/objc-trace-,\
 BUILD_INFO_LOGGING_HOST_TESTS := $(addprefix $(HOST_TEST_OUTPUT_DIR)/build-info-logging-,\
   present missing)
 SPATIAL_MIXER_PCM_HOST_TEST := $(HOST_TEST_OUTPUT_DIR)/spatial-mixer-pcm-host
+INVOCATION_FLOATING_AGGREGATE_HOST_TEST := \
+  $(HOST_TEST_OUTPUT_DIR)/invocation-floating-aggregate-host
+
+.PHONY: check-invocation-floating-aggregate-host
+check-invocation-floating-aggregate-host: $(INVOCATION_FLOATING_AGGREGATE_HOST_TEST)
+	"$(INVOCATION_FLOATING_AGGREGATE_HOST_TEST)"
+
+$(INVOCATION_FLOATING_AGGREGATE_HOST_TEST): invocation_floating_aggregate_host.c \
+  ../include/LC32InvocationABI.h
+	@mkdir -p "$(HOST_TEST_OUTPUT_DIR)"
+	$(HOST_CC) $(HOST_CFLAGS) invocation_floating_aggregate_host.c -o "$@"
 
 .PHONY: check-spatial-mixer-pcm-host
 check-spatial-mixer-pcm-host: $(SPATIAL_MIXER_PCM_HOST_TEST)
