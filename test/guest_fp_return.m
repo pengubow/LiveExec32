@@ -130,6 +130,124 @@ static NSInvocation *LC32HostInvocation(id object, SEL selector) {
 - (CGFloat)receivedAlpha { return receivedAlpha; }
 @end
 
+/* A camera tween can use KVC on a float ivar even when the game supplies no
+ * setter. Exercise the native fallback, inherited bindings, and real accessors
+ * through the same Foundation calls used by that animation. */
+@interface LC32GuestFloatingIvarProbe : NSObject {
+@public
+    uint32_t before;
+    float tweenValue;
+    double preciseValue;
+    float _underscoredValue;
+    uint32_t after;
+    float readOnlyValue;
+    float customValue;
+    NSUInteger setterCalls;
+}
+- (float)readOnlyValue;
+- (float)customValue;
+- (void)setCustomValue:(float)value;
+@end
+
+@implementation LC32GuestFloatingIvarProbe
+- (float)readOnlyValue {
+    return readOnlyValue + 0.25f;
+}
+
+- (float)customValue {
+    return customValue;
+}
+
+- (void)setCustomValue:(float)value {
+    customValue = value + 1.0f;
+    setterCalls++;
+}
+@end
+
+@interface LC32InheritedFloatingIvarProbe : LC32GuestFloatingIvarProbe
+@end
+
+@implementation LC32InheritedFloatingIvarProbe
+@end
+
+static BOOL LC32TestFloatingIvars(void) {
+    LC32InheritedFloatingIvarProbe *probe =
+        [LC32InheritedFloatingIvarProbe new];
+    probe->before = UINT32_C(0x13579bdf);
+    probe->after = UINT32_C(0x2468ace0);
+
+    LC32HostSetValueForKey(probe, [NSNumber numberWithFloat:-3.125f],
+        @"tweenValue");
+    const BOOL floatPassed = probe->tweenValue == -3.125f &&
+        [LC32HostValueForKey(probe, @"tweenValue") floatValue] == -3.125f;
+
+    const double preciseValue = 1.0000000000000002;
+    LC32HostSetValueForKey(probe, [NSNumber numberWithDouble:preciseValue],
+        @"preciseValue");
+    const BOOL doublePassed = probe->preciseValue == preciseValue &&
+        [LC32HostValueForKey(probe, @"preciseValue") doubleValue] ==
+            preciseValue;
+
+    LC32HostSetValueForKey(probe, [NSNumber numberWithFloat:0.625f],
+        @"_underscoredValue");
+    const BOOL underscorePassed = probe->_underscoredValue == 0.625f &&
+        [LC32HostValueForKey(probe, @"underscoredValue") floatValue] == 0.625f;
+
+    LC32HostSetValueForKey(probe, [NSNumber numberWithFloat:2.0f],
+        @"readOnlyValue");
+    const BOOL getterPassed = probe->readOnlyValue == 2.0f &&
+        [LC32HostValueForKey(probe, @"readOnlyValue") floatValue] == 2.25f;
+
+    LC32HostSetValueForKey(probe, [NSNumber numberWithFloat:4.0f],
+        @"customValue");
+    const BOOL setterPassed = probe->customValue == 5.0f &&
+        probe->setterCalls == 1;
+
+    NSInvocation *setter = [LC32HostInvocation(
+        probe, NSSelectorFromString(@"setTweenValue:")) retain];
+    NSInvocation *getter = [LC32HostInvocation(
+        probe, NSSelectorFromString(@"tweenValue")) retain];
+    const uint32_t payloads[] = {
+        UINT32_C(0x80000000), UINT32_C(0x7fc01234), UINT32_C(0x00000001),
+    };
+    BOOL bitsPassed = YES;
+    for(unsigned index = 0; index < sizeof(payloads) / sizeof(*payloads);
+            index++) {
+        float input;
+        memcpy(&input, &payloads[index], sizeof(input));
+        [setter setArgument:&input atIndex:2];
+        [setter invoke];
+        uint32_t stored;
+        memcpy(&stored, &probe->tweenValue, sizeof(stored));
+        [getter invoke];
+        float output;
+        [getter getReturnValue:&output];
+        uint32_t returned;
+        memcpy(&returned, &output, sizeof(returned));
+        bitsPassed &= stored == payloads[index] && returned == payloads[index];
+    }
+    const BOOL guardsPassed = probe->before == UINT32_C(0x13579bdf) &&
+        probe->after == UINT32_C(0x2468ace0);
+    [setter release];
+    [getter release];
+    [probe release];
+
+    printf("host-kvc-bare-float-ivar: %s\n", floatPassed ? "PASS" : "FAIL");
+    printf("host-kvc-bare-double-ivar: %s\n", doublePassed ? "PASS" : "FAIL");
+    printf("host-kvc-inherited-underscored-float: %s\n",
+        underscorePassed ? "PASS" : "FAIL");
+    printf("host-kvc-real-float-getter-preserved: %s\n",
+        getterPassed ? "PASS" : "FAIL");
+    printf("host-kvc-real-float-setter-preserved: %s\n",
+        setterPassed ? "PASS" : "FAIL");
+    printf("host-invocation-bare-float-ivar-bits: %s\n",
+        bitsPassed ? "PASS" : "FAIL");
+    printf("host-kvc-floating-ivar-guards: %s\n",
+        guardsPassed ? "PASS" : "FAIL");
+    return floatPassed && doublePassed && underscorePassed && getterPassed &&
+        setterPassed && bitsPassed && guardsPassed;
+}
+
 static BOOL LC32TestScalarArguments(LC32GuestFloatProbe *probe,
                                    LC32GuestCGFloatView *view) {
     // Preserve exact bits, including signed zero, a NaN payload, subnormal
@@ -295,6 +413,7 @@ int main(void) {
     printf("host-callback-cgfloat-return: %s\n",
            cgFloatPassed ? "PASS" : "FAIL");
     const BOOL scalarArgumentsPassed = LC32TestScalarArguments(floatProbe, view);
+    const BOOL floatingIvarsPassed = LC32TestFloatingIvars();
 
     /* UITableViewDelegate declares CGFloat on the host, but the guest class
      * has no native superclass implementation and inherits its protocol
@@ -322,5 +441,5 @@ int main(void) {
     [floatProbe release];
     [pool drain];
     return !(floatPassed && doublePassed && cgFloatPassed &&
-             protocolCGFloatPassed && scalarArgumentsPassed);
+             protocolCGFloatPassed && scalarArgumentsPassed && floatingIvarsPassed);
 }
