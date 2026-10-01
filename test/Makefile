@@ -447,6 +447,9 @@ $(eval $(call lc32_guest_test,lc32-uikit-orientation-startup,uikit_orientation_s
 $(eval $(call lc32_guest_test,lc32-uikit-manual-projection-rotation,uikit_manual_projection_rotation.m,Foundation UIKit QuartzCore CoreGraphics))
 $(eval $(call lc32_guest_test,lc32-uikit-landscape-renderer-startup,uikit_landscape_renderer_startup.m,Foundation UIKit QuartzCore CoreGraphics))
 $(eval $(call lc32_guest_test,lc32-uikit-classic-direct-view-canvas,uikit_classic_direct_view_canvas.m,Foundation UIKit CoreGraphics))
+$(eval $(call lc32_guest_test,lc32-uikit-direct-renderer-canvas,uikit_classic_direct_view_canvas.m,Foundation UIKit CoreGraphics QuartzCore))
+$(eval $(call lc32_guest_test,lc32-uikit-direct-renderer-controller-canvas,uikit_classic_direct_view_canvas.m,Foundation UIKit CoreGraphics QuartzCore))
+$(eval $(call lc32_guest_test,lc32-uikit-direct-renderer-landscape-canvas,uikit_classic_direct_view_canvas.m,Foundation UIKit CoreGraphics QuartzCore LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-string-sizing,uikit_legacy_string_sizing.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-legacy-window-root,uikit_legacy_window_root.m,Foundation UIKit CoreGraphics LC32))
 $(eval $(call lc32_guest_test,lc32-uikit-view-load-reentrancy,uikit_view_load_reentrancy.m,Foundation UIKit CoreGraphics LC32))
@@ -530,6 +533,20 @@ lc32-uikit-landscape-renderer-startup_CFLAGS := -fno-objc-arc -target armv7s-app
 lc32-uikit-landscape-renderer-startup_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
 lc32-uikit-classic-direct-view-canvas_CFLAGS := -fno-objc-arc -target armv7s-apple-ios7.0
 lc32-uikit-classic-direct-view-canvas_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
+lc32-uikit-direct-renderer-canvas_CFLAGS := -fno-objc-arc \
+	-target armv7s-apple-ios7.0 -DLC32_TEST_DIRECT_GL_RENDERER=1
+lc32-uikit-direct-renderer-canvas_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
+lc32-uikit-direct-renderer-controller-canvas_CFLAGS := -fno-objc-arc \
+	-target armv7s-apple-ios7.0 -DLC32_TEST_DIRECT_GL_RENDERER=1 \
+	-DLC32_TEST_RENDERER_CONTROLLER=1
+lc32-uikit-direct-renderer-controller-canvas_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,7.0
+lc32-uikit-direct-renderer-landscape-canvas_USE_MODULES := 1
+# Deployment can remain at 7.0; the linked SDK controls the pre-iOS-6 policy.
+lc32-uikit-direct-renderer-landscape-canvas_CFLAGS := -fno-objc-arc \
+	-target armv7s-apple-ios7.0 -DLC32_TEST_DIRECT_GL_RENDERER=1 \
+	-DLC32_TEST_LANDSCAPE_DIRECT_RENDERER=1 \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-uikit-direct-renderer-landscape-canvas_LDFLAGS += -target armv7s-apple-ios7.0 -Wl,-sdk_version,3.0
 # Per-source flags follow Theos' DEBUG_CFLAGS, which otherwise restore -O0.
 uikit_orientation_startup.m_CFLAGS := -O2
 

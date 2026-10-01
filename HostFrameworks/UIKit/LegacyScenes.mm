@@ -94,9 +94,14 @@ void ObserveClassicCanvasWithoutDelegate(UIWindowScene *scene) {
         @(scene.interfaceOrientation), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        /* Old games can repeatedly process ready events without reaching an
+         * idle boundary. Check before source delivery as well, so a resumed
+         * scene's resize cannot wait for the renderer to become idle. The
+         * callback refits only when the observed scene geometry changes. */
         CFRunLoopObserverRef observer = CFRunLoopObserverCreate(
             kCFAllocatorDefault,
-            kCFRunLoopBeforeWaiting | kCFRunLoopExit, true, 0,
+            kCFRunLoopBeforeSources | kCFRunLoopBeforeWaiting |
+                kCFRunLoopExit, true, 0,
             ObserveClassicCanvasRunLoop, nullptr);
         if(!observer) return;
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
