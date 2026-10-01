@@ -70,8 +70,12 @@ xcrun --sdk iphonesimulator clang -target arm64-apple-ios15.0-simulator \
     -I"$repo_root/include" -I"$repo_root/HostFrameworks/UIKit" \
     -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -lc++ \
     "$repo_root/test/uikit_legacy_rootless_rotation.m" \
+    "$repo_root/test/uikit_native_keyboard_policy.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyAutoLayout.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyAlerts.mm" \
+    "$repo_root/HostFrameworks/UIKit/LegacyKeyboard.mm" \
+    "$repo_root/HostFrameworks/UIKit/NativeUIKitMethod.mm" \
+    "$repo_root/HostFrameworks/UIKit/NativeWindowPolicy.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyRotation.mm" -o "$workdir/test"
 
 for sdk in $sdks; do

@@ -91,6 +91,8 @@ LiveExec32Shared_FILES = \
 	../Accelerate/Accelerate.mm \
 	../OpenAL/OpenAL.mm ../OpenGLES/OpenGLES.mm ../UIKit/UIKit.mm \
 	../UIKit/LegacyAutoLayout.mm ../UIKit/LegacyFonts.mm ../UIKit/LegacyAlerts.mm \
+	../UIKit/LegacyKeyboard.mm ../UIKit/NativeUIKitMethod.mm \
+	../UIKit/NativeWindowPolicy.mm \
 	../UIKit/LegacyRotation.mm ../UIKit/LegacyScenes.mm \
 	../UIKit/LegacyNibLoading.mm
 LiveExec32Shared_CFLAGS = \
@@ -100,6 +102,9 @@ LiveExec32Shared_CCFLAGS = -std=c++17
 crash_exception.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyFonts.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyAlerts.mm_CFLAGS = -fobjc-arc
+../UIKit/LegacyKeyboard.mm_CFLAGS = -fobjc-arc
+../UIKit/NativeUIKitMethod.mm_CFLAGS = -fobjc-arc
+../UIKit/NativeWindowPolicy.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyRotation.mm_CFLAGS = -fobjc-arc
 ../UIKit/LegacyScenes.mm_CFLAGS = -fobjc-arc
 LiveExec32Shared_OBJ_FILES = $(DYNARMIC_STATIC_LIBS)

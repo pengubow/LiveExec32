@@ -1,5 +1,6 @@
 #import "LC32LegacyRotation.h"
 #import "LC32LegacyAlerts.h"
+#import "LC32NativeWindowPolicy.h"
 #import "LC32LegacyCanvas.h"
 #import "LC32LegacyScenes.h"
 #import "LC32NativeViewGeometry.h"
@@ -890,7 +891,7 @@ extern "C" bool LC32SynchronizeNativeLegacyAlertWindow(UIWindow *window) {
         return false;
     }
     TrackNativeAlertWindow(window);
-    LC32NativeAlertSceneScope scenePolicy(window);
+    LC32NativeWindowSceneScope scenePolicy(window);
     UIViewController *controller = NativeRoot(window);
     UIWindowScene *scene = window.windowScene;
     UIInterfaceOrientation orientation = scene.interfaceOrientation;
@@ -1055,7 +1056,7 @@ static void FitControllerCanvas(UIViewController *controller) {
 - (void)lc32_updateToInterfaceOrientation:(UIInterfaceOrientation)orientation
         duration:(NSTimeInterval)duration force:(BOOL)force {
     const bool nativeAlert = LC32IsNativeAlertPresenterWindow(self);
-    LC32NativeAlertSceneScope scenePolicy(nativeAlert ? self : nil);
+    LC32NativeWindowSceneScope scenePolicy(self);
     // Scene-owned windows do not run the old backing update as part of their
     // view rotation. Sync its extent before resizing the client and its root
     // transform afterwards, including a same-orientation scene-size change.
@@ -1076,7 +1077,7 @@ static void FitControllerCanvas(UIViewController *controller) {
 }
 - (void)lc32_configureRootLayer:(CALayer *)root sceneTransformLayer:(CALayer *)scene
         transformLayer:(CALayer *)transform {
-    LC32NativeAlertSceneScope scenePolicy(self);
+    LC32NativeWindowSceneScope scenePolicy(self);
     // A presented overlay suspends the renderer's rotation queries, not the
     // backing coordinate system of the window beneath it.
     if(!ControllerForWindow(self, true)) {

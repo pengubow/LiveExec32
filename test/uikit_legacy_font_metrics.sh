@@ -50,6 +50,9 @@ xcrun --sdk iphonesimulator clang -target arm64-apple-ios15.0-simulator \
     "$repo_root/test/uikit_legacy_font_metrics.m" \
     "$repo_root/HostFrameworks/UIKit/LegacyFonts.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyAlerts.mm" \
+    "$repo_root/HostFrameworks/UIKit/LegacyKeyboard.mm" \
+    "$repo_root/HostFrameworks/UIKit/NativeUIKitMethod.mm" \
+    "$repo_root/HostFrameworks/UIKit/NativeWindowPolicy.mm" \
     "$repo_root/HostFrameworks/UIKit/LegacyAutoLayout.mm" -o "$workdir/test"
 
 for sdk in 0 7 10 11; do

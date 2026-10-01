@@ -14,6 +14,9 @@
 #include "LC32LegacyRotation.h"
 #include "LC32LegacyScenes.h"
 
+extern void LC32TestNativeKeyboardPolicy(UIWindow *guest,
+    void (*check)(const char *, BOOL));
+
 /* Native-only fixture: compile the actual LegacyRotation.mm implementation,
  * not the emulator or guest selector bridge. Explicit registration stands in
  * for the bridge's classification of guest-created controller classes. */
@@ -1571,6 +1574,7 @@ static void nativeOrientationUpdateProbe(RootlessRotationRefreshWindow *window, 
         [self checkRotationUpdateOrdering];
         [self checkModernDeviceNotifications];
         [self checkNativeAlertSceneSynchronization];
+        LC32TestNativeKeyboardPolicy(self.window, check);
     } else if([testCase isEqualToString:@"modern-refresh"]) {
         check("modern-refresh-probe-completed", self.completedRefreshProbe);
     } else if([testCase isEqualToString:@"modern-only"]) {
