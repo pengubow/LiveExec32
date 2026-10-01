@@ -31,6 +31,20 @@ static int failures;
 }
 @end
 
+static unsigned mirrorDeallocCount;
+
+/* Native allocation of this guest class followed by a borrowed conversion
+ * supplies the native lifetime pin, not a separate guest owner. */
+@interface LC32NativeMirrorReleaseProbe : NSObject
+@end
+
+@implementation LC32NativeMirrorReleaseProbe
+- (void)dealloc {
+    __atomic_fetch_add(&mirrorDeallocCount, 1, __ATOMIC_RELAXED);
+    [super dealloc];
+}
+@end
+
 static void report(const char *name, BOOL passed) {
     printf("native-proxy-release-%s: %s\n", name, passed ? "PASS" : "FAIL");
     failures += !passed;
@@ -51,9 +65,9 @@ typedef struct {
     unsigned baseline;
 } Proxy;
 
-static Proxy createProxy(unsigned nativeOwners) {
+static Proxy createProxy(Class guestClass, unsigned nativeOwners) {
     if(!nativeOwners) abort();
-    const uint64_t hostClass = [(id)[NSObject class] host_self];
+    const uint64_t hostClass = [(id)guestClass host_self];
     const uint64_t allocation = rawSend(hostClass, @selector(alloc));
     const uint64_t host = allocation ? rawSend(allocation, @selector(init)) : 0;
     if(!host) {
@@ -99,8 +113,8 @@ static void finishProxy(Proxy proxy, const char *name) {
         __atomic_load_n(&deallocCount, __ATOMIC_RELAXED) == proxy.baseline + 1);
 }
 
-static void testBorrowedRelease(void) {
-    Proxy proxy = createProxy(3);
+static void testBorrowedRelease(Class guestClass) {
+    Proxy proxy = createProxy(guestClass, 3);
     /* A raw native +1 can be consumed through a borrowed guest proxy. That
      * does not transfer ownership of the host's guest lifetime pin. */
     [proxy.guest release];
@@ -118,16 +132,16 @@ static void testBorrowedRelease(void) {
     finishProxy(proxy, "final-native-release-destroys-proxy-once");
 }
 
-static void testNativeOnlyOwners(void) {
-    Proxy proxy = createProxy(3);
+static void testNativeOnlyOwners(Class guestClass) {
+    Proxy proxy = createProxy(guestClass, 3);
     rawSend(proxy.host, @selector(release));
     rawSend(proxy.host, @selector(release));
     report("native-only-releases-preserve-pin", liveWithOwners(proxy, 1));
     finishProxy(proxy, "native-only-final-release-destroys-proxy-once");
 }
 
-static void testBorrowedAutorelease(void) {
-    Proxy proxy = createProxy(2);
+static void testBorrowedAutorelease(Class guestClass) {
+    Proxy proxy = createProxy(guestClass, 2);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
     [proxy.guest autorelease];
     report("autorelease-does-not-consume-pin-early", liveWithOwners(proxy, 2));
@@ -138,8 +152,8 @@ static void testBorrowedAutorelease(void) {
     finishProxy(proxy, "autorelease-final-native-release-destroys-proxy-once");
 }
 
-static void testBalancedAutorelease(void) {
-    Proxy proxy = createProxy(1);
+static void testBalancedAutorelease(Class guestClass) {
+    Proxy proxy = createProxy(guestClass, 1);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
     [[proxy.guest retain] autorelease];
     report("balanced-autorelease-retains-logical-owner",
@@ -167,10 +181,11 @@ static void *releaseWorker(void *opaque) {
     return NULL;
 }
 
-static void testConcurrentNativeOwners(void) {
+static void testConcurrentNativeOwners(Class guestClass) {
     /* All worker releases are covered by real native references. The extra
      * owner protects the shared proxy until every worker has joined. */
-    Proxy proxy = createProxy(1 + WorkerCount * ReleasesPerWorker);
+    Proxy proxy = createProxy(
+        guestClass, 1 + WorkerCount * ReleasesPerWorker);
     ReleaseWork work = {proxy.guest, 0};
     pthread_t workers[WorkerCount];
     unsigned created = 0;
@@ -204,14 +219,24 @@ static void testConcurrentNativeOwners(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     NSAutoreleasePool *pool = [NSAutoreleasePool new];
-    testBorrowedRelease();
-    testNativeOnlyOwners();
-    testBorrowedAutorelease();
-    testBalancedAutorelease();
-    testConcurrentNativeOwners();
+    const Class classes[] = {
+        NSObject.class, LC32NativeMirrorReleaseProbe.class
+    };
+    for(unsigned index = 0; index < sizeof(classes) / sizeof(*classes);
+            ++index) {
+        Class guestClass = classes[index];
+        printf("native-proxy-release-class: %s\n", class_getName(guestClass));
+        testBorrowedRelease(guestClass);
+        testNativeOnlyOwners(guestClass);
+        testBorrowedAutorelease(guestClass);
+        testBalancedAutorelease(guestClass);
+        testConcurrentNativeOwners(guestClass);
+    }
     [pool drain];
     report("all-proxies-destroyed-once",
-        __atomic_load_n(&deallocCount, __ATOMIC_RELAXED) == 5);
+        __atomic_load_n(&deallocCount, __ATOMIC_RELAXED) == 10);
+    report("all-mirrors-destroyed-once",
+        __atomic_load_n(&mirrorDeallocCount, __ATOMIC_RELAXED) == 5);
     printf("native-proxy-release-regression: %s\n", failures ? "FAIL" : "PASS");
     return failures != 0;
 }

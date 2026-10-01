@@ -344,6 +344,7 @@ $(eval $(call lc32_guest_test,lc32-cfnetwork-host-resolution,cfnetwork_host_reso
 $(eval $(call lc32_guest_test,lc32-collection-object-buffers,collection_object_buffers.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-foundation-dynamic-framework-class,foundation_dynamic_framework_class.m,Foundation))
 $(eval $(call lc32_guest_test,lc32-class-cluster-reuse,class_cluster_reuse.m,Foundation CoreFoundation LC32))
+$(eval $(call lc32_guest_test,lc32-keyed-archive-replacement,keyed_archive_replacement.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-guest-input-stream,guest_input_stream.m,Foundation LC32))
 $(eval $(call lc32_guest_test,lc32-stream-io,stream_io.m,Foundation CoreFoundation LC32))
 lc32-stream-io_CFLAGS := -DLC32_TEST_STREAM_BOUNDS
@@ -539,6 +540,9 @@ lc32-iconv-smoke_LDFLAGS += -liconv
 lc32-guest-proxy-lifetime_CFLAGS := -I$(abspath ../include)
 lc32-native-proxy-release_USE_MODULES := 1
 lc32-native-proxy-release_CFLAGS := -fno-objc-arc \
+	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
+lc32-keyed-archive-replacement_USE_MODULES := 1
+lc32-keyed-archive-replacement_CFLAGS := -fno-objc-arc \
 	-I$(abspath ../GuestFrameworks) -I$(abspath ../include)
 # Theos has one recursive instance per executable. Its DEBUG schema adds -O0
 # after target CFLAGS, so select the optimization for this instance explicitly.

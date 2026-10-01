@@ -6699,13 +6699,14 @@ static u32 LC32ReleaseNativeProxyOwnership(
         &entry->weakHostObject, (id)(uintptr_t)hostAddress);
     if(!hostObject) return reject();
     LC32HostInvocationReceiverGuard nativeGuard;
-    (void)nativeGuard.adoptRetained(hostObject);
+    nativeGuard.adoptRetained(hostObject);
 
-    /* Synthesized guest classes retain their existing coordinated teardown
-     * contract. This path is only for ordinary native framework objects. */
-    if(LC32GuestMirrorRetiringState(hostObject)) {
-        return LC32NativeProxyReleaseNotApplicable;
-    }
+    /* The pin belongs to the native peer regardless of which side defined
+     * its class. A native archive decoder can allocate a synthesized guest
+     * class and invoke an initializer which autoreleases its original self.
+     * That receiver has only the pin's guest +1: consuming its native
+     * allocation must not also consume the pin here. The final native
+     * release still runs the mirror's coordinated teardown below. */
 
     static std::atomic<u32> releasePrimitive{0};
     const u32 guestRelease = LC32CachedGuestSymbol(
